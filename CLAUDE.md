@@ -1,45 +1,51 @@
 # Weir
 
-Streaming data reliability platform. Detects, localizes, and explains data incidents.
+Streaming data reliability platform. Detects, localizes, and explains data
+incidents.
 
-**Differentiator:** publishes measured detection rate, false-positive rate, and
-detection latency against a reproducible injected-failure catalog. Comparable
-OSS tools (Great Expectations, Soda, Deequ, OpenMetadata, Marquez) define
-checks; none publish measured detection performance.
+**Differentiator:** publishes measured detection rate, false-positive rate,
+and detection latency against injected failures. No comparable OSS project
+does this.
 
-**Deadline:** end of August 2026. Sprint 1 scope is fixed. Do not expand it.
+## Locked stack
 
-## Stack
+Kafka, Apache Flink, Apache Iceberg, S3-compatible object store, PostgreSQL,
+FastAPI, Terraform, Docker Compose, OpenTelemetry, Prometheus, Grafana.
 
-**Sprint 1:** Kafka, Flink, Iceberg, S3-compatible store, PostgreSQL, FastAPI,
-Docker Compose, GitHub Actions.
-
-**Deferred** (Future Work section, not built): Terraform/AWS, AI agent, runtime
-lineage emission, distribution drift detector, sensitivity sweep.
-
-**Never:** Spark, Trino, dbt, Airflow, Kubernetes, agent frameworks.
+**Excluded:** Spark, Trino, dbt, Airflow, Kubernetes, Superset, any agent
+framework.
 
 ## Hard rules
 
-1. NEVER invent, estimate, or placeholder a metric. Detection rates, FP rates,
-   and latencies come only from running `benchmarks/run_benchmark.py`.
-2. NEVER let `benchmarks/` import from `incidents/dev/`. Enforce with a test.
-3. NEVER tune a detector to pass a benchmark scenario. Misses get reported.
-4. Pin every Docker image to an explicit version. No `:latest`, ever.
-5. No `MISSING_VALIDATION` / `MISSING_TEST` / `TODO` markers left in shipped
-   code. If something is incomplete, it either gets finished or it gets
-   removed and listed in README Future Work. There is no third state.
-6. Anything adapted from `reference/` gets a PROVENANCE.md entry in the same
-   commit.
-7. When a design choice has a real alternative, state the alternative and the
-   tradeoff BEFORE implementing.
-8. Every module ships with tests, and CI runs them. Untested code is not done.
+1. NEVER invent, estimate, or placeholder a metric value. Detection rates,
+   FP rates, and latencies come only from running
+   `benchmarks/run_benchmark.py`. No plausible-looking numbers in READMEs,
+   docstrings, comments, or test fixtures that could leak into docs.
+2. NEVER let `benchmarks/` import from `incidents/dev/`. Enforce with a
+   test.
+3. NEVER tune a detector to pass a benchmark scenario. If it misses, it
+   misses, and the miss gets reported.
+4. Any file adapted from `reference/` gets a PROVENANCE.md entry in the
+   same commit.
+5. When making a design choice with a real alternative, state the
+   alternative and the tradeoff BEFORE implementing.
+6. Never add a dependency without asking.
+7. Lineage is emitted at runtime. Never fall back to a hand-written YAML
+   graph without telling me explicitly and marking it in the README.
 
 ## Commit discipline
 
-- After each logical unit: show me the diff summary and a proposed message,
-  then WAIT for my confirmation. Never commit unprompted.
-- Conventional Commits: `feat|fix|refactor|test|docs|chore|bench(scope): summary`
-- Body explains WHY, including tradeoffs. Footer `Provenance:` where adapted.
-- Never squash, amend, or force-push. History is evidence.
-- Commit failures and their fixes as separate commits.
+8. After every logically complete unit of work, propose a commit: show me
+   the diff summary and a message, then WAIT for my confirmation. Never
+   commit without my explicit go-ahead — I read the diff before it lands.
+9. One commit = one logical change. Never bundle unrelated work.
+10. Conventional Commits format:
+    `feat|fix|refactor|test|docs|chore|infra|bench(scope): summary`
+    Body: what changed and WHY. Include the tradeoff if there was one.
+    Footer: `Provenance: adapted from streaming-lakehouse-lab <file>` where
+    relevant.
+11. Never squash, amend, force-push, or rewrite history. The history is
+    evidence of how this was built and it stays intact, including the ugly
+    parts.
+12. Never commit generated benchmark results without me having actually run
+    the benchmark that produced them.
