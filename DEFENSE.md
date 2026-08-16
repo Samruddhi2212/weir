@@ -1,5 +1,13 @@
 # Defense
 
+A running log of design decisions: what was chosen, the alternative that
+lost, the tradeoff, and whether it can be explained cold — out loud, from
+memory, without re-deriving it.
+
+**Rule:** if an entry can't be written for a decision, the code implementing
+that decision doesn't get committed. An unwritten entry means the tradeoff
+hasn't actually been thought through yet.
+
 ## 1. Detector read path and detection latency floor
 
 Detectors read from the live Kafka stream and from Postgres, not from
