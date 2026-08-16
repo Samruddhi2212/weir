@@ -10,10 +10,18 @@ does this.
 ## Locked stack
 
 Kafka, Apache Flink, Apache Iceberg, S3-compatible object store, PostgreSQL,
-FastAPI, Terraform, Docker Compose, OpenTelemetry, Prometheus, Grafana.
+FastAPI, Terraform, Docker Compose, OpenTelemetry, Prometheus, Grafana, and
+a Weir-built triage/explanation agent.
 
-**Excluded:** Spark, Trino, dbt, Airflow, Kubernetes, Superset, any agent
-framework.
+Locked means eventually built, not necessarily Sprint 1. Sprint 1 scope
+within this stack: Terraform and the agent are deferred (see
+docs/FUTURE_WORK.md). OpenTelemetry instrumentation is in Sprint 1 —
+detection latency is a published metric and must be instrumented from the
+start. Prometheus and Grafana dashboards are deferred.
+
+**Excluded:** Spark, Trino, dbt, Airflow, Kubernetes, Superset, any
+third-party agent framework — the agent above is built in-house, never
+bought off the shelf.
 
 ## Hard rules
 
