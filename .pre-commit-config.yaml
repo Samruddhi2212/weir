@@ -1,0 +1,16 @@
+repos:
+  - repo: local
+    hooks:
+      - id: no-gap-markers
+        name: "CLAUDE.md C1 - no gap markers in shipped code"
+        entry: scripts/check_no_gap_markers.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: docker-images-pinned
+        name: "CLAUDE.md C4 - every Docker image pinned, no :latest"
+        entry: scripts/check_pinned_images.sh
+        language: system
+        pass_filenames: false
+        always_run: true

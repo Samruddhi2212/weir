@@ -23,6 +23,24 @@ start. Prometheus and Grafana dashboards are deferred.
 third-party agent framework — the agent above is built in-house, never
 bought off the shelf.
 
+## Constraints (mechanically enforced)
+
+These are enforced by a pre-commit hook and a CI job, not just this file.
+C3 (benchmarks/ never importing incidents/dev/, hard rule 2 below) is also
+mechanically enforced but isn't renumbered here since its content already
+lives in Hard rules — flagging in case a C3 entry was expected in this
+section specifically.
+
+- **C1** — No `MISSING_VALIDATION` / `MISSING_TEST` / `TODO` / `FIXME`
+  markers left in shipped code. If something is incomplete, it either gets
+  finished or removed and listed in docs/FUTURE_WORK.md. There is no third
+  state. Enforced by `scripts/check_no_gap_markers.sh`.
+- **C2** — No orphan directories for excluded or deferred scope. A
+  directory only exists once real work starts in it.
+- **C4** — Pin every Docker image to an explicit version. No `:latest`,
+  ever. Enforced by `scripts/check_pinned_images.sh`.
+- **C5** — CI runs every test in `tests/`. Untested code is not done.
+
 ## Hard rules
 
 1. NEVER invent, estimate, or placeholder a metric value. Detection rates,

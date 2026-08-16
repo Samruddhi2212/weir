@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  constraints:
+    name: Constraints (C1, C4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No gap markers (C1)
+        run: bash scripts/check_no_gap_markers.sh
+      - name: Docker images pinned (C4)
+        run: bash scripts/check_pinned_images.sh
+
+  test:
+    name: Test suite (C5)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pytest
+        run: pip install pytest
+      - name: Run tests
+        # No modules or tests exist yet, so this currently fails with
+        # pytest exit 5 ("no tests collected"). That's expected: CLAUDE.md
+        # C5 says CI runs every test and untested code is not done - this
+        # job goes green only once real code and tests land together.
+        run: pytest -q tests/
