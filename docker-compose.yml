@@ -1,0 +1,178 @@
+# ============================================================
+# Weir - Local Infrastructure
+# ============================================================
+# Kafka (KRaft), PostgreSQL, SeaweedFS (S3-compatible), Flink.
+# Every image is pinned to an explicit tag. No :latest.
+#
+#   make up      # start all services
+#   make down    # stop all services and remove volumes
+#   make logs    # tail service logs
+#   make seed    # create the warehouse bucket
+#   make test    # run the test suite
+# ============================================================
+
+networks:
+  weir:
+    driver: bridge
+    name: weir-network
+
+volumes:
+  kafka-data:
+  postgres-data:
+  seaweedfs-data:
+  flink-checkpoints:
+  flink-savepoints:
+
+services:
+  # ------------------------------------------------------------
+  # Kafka (KRaft mode, combined broker+controller)
+  # ------------------------------------------------------------
+  kafka:
+    image: apache/kafka:4.1.0
+    container_name: weir-kafka
+    hostname: kafka
+    networks:
+      - weir
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-4L6g3nShT-eMCtK--X86sw}
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ------------------------------------------------------------
+  # PostgreSQL (Iceberg catalog metadata store)
+  # ------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: weir-postgres
+    hostname: postgres
+    networks:
+      - weir
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-weir_catalog}
+      POSTGRES_USER: ${POSTGRES_USER:-weir}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-weir}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-weir} -d ${POSTGRES_DB:-weir_catalog}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ------------------------------------------------------------
+  # SeaweedFS (S3-compatible object store)
+  # ------------------------------------------------------------
+  # Chosen over MinIO (server AGPLv3; community repo archived
+  # 2026-04-25, no further releases or security patches) and
+  # LocalStack (since 2026-03, requires an auth-token account to
+  # pull/run even the free tier). SeaweedFS is Apache-2.0 and
+  # actively released.
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.41
+    container_name: weir-seaweedfs
+    hostname: seaweedfs
+    networks:
+      - weir
+    ports:
+      - "${SEAWEEDFS_MASTER_PORT:-9333}:9333"
+      - "${SEAWEEDFS_S3_PORT:-8333}:8333"
+      - "${SEAWEEDFS_FILER_PORT:-8888}:8888"
+    command: server -s3 -dir=/data -ip.bind=0.0.0.0 -master.volumeSizeLimitMB=1024
+    volumes:
+      - seaweedfs-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9333/cluster/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ------------------------------------------------------------
+  # Flink JobManager
+  # ------------------------------------------------------------
+  flink-jobmanager:
+    image: flink:2.1.0-java21
+    container_name: weir-flink-jobmanager
+    hostname: flink-jobmanager
+    networks:
+      - weir
+    ports:
+      - "${FLINK_JOBMANAGER_UI_PORT:-8081}:8081"
+      - "${FLINK_JOBMANAGER_RPC_PORT:-6123}:6123"
+    environment:
+      # Appended to conf/flink-conf.yaml by the image's entrypoint at
+      # container start. Lets the sensitivity sweep vary checkpoint
+      # interval without editing config/flink/flink-conf.yaml. See
+      # DEFENSE.md #1.
+      FLINK_PROPERTIES: |
+        execution.checkpointing.interval: ${WEIR_CHECKPOINT_INTERVAL:-60s}
+    volumes:
+      - flink-checkpoints:/tmp/flink-checkpoints
+      - flink-savepoints:/tmp/flink-savepoints
+      - ./config/flink:/opt/flink/conf:ro
+    command: jobmanager
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/overview || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ------------------------------------------------------------
+  # Flink TaskManager
+  # ------------------------------------------------------------
+  flink-taskmanager:
+    image: flink:2.1.0-java21
+    container_name: weir-flink-taskmanager
+    hostname: flink-taskmanager
+    networks:
+      - weir
+    environment:
+      FLINK_PROPERTIES: |
+        execution.checkpointing.interval: ${WEIR_CHECKPOINT_INTERVAL:-60s}
+    volumes:
+      - flink-checkpoints:/tmp/flink-checkpoints
+      - flink-savepoints:/tmp/flink-savepoints
+      - ./config/flink:/opt/flink/conf:ro
+    command: taskmanager
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f taskmanager || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

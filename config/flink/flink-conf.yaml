@@ -1,0 +1,40 @@
+# ============================================================
+# Flink Configuration
+# ============================================================
+# Shared configuration for JobManager and TaskManager.
+#
+# execution.checkpointing.interval is intentionally NOT set here.
+# It is supplied per-container via the FLINK_PROPERTIES env var in
+# docker-compose.yml (WEIR_CHECKPOINT_INTERVAL, default 60s), so the
+# sensitivity sweep can vary it without editing this file. See
+# DEFENSE.md #1.
+
+jobmanager.rpc.address: flink-jobmanager
+jobmanager.rpc.port: 6123
+jobmanager.memory.process.size: 1600m
+
+taskmanager.numberOfTaskSlots: 4
+taskmanager.memory.process.size: 1728m
+
+parallelism.default: 2
+
+# Checkpointing (interval supplied via FLINK_PROPERTIES, see above)
+execution.checkpointing.mode: EXACTLY_ONCE
+execution.checkpointing.timeout: 10min
+execution.checkpointing.min-pause: 30s
+execution.checkpointing.max-concurrent-checkpoints: 1
+execution.checkpointing.tolerable-failed-checkpoints: 3
+
+# State backend
+state.backend: rocksdb
+state.checkpoints.dir: file:///tmp/flink-checkpoints
+state.savepoints.dir: file:///tmp/flink-savepoints
+
+# Restart strategy
+restart-strategy: fixed-delay
+restart-strategy.fixed-delay.attempts: 3
+restart-strategy.fixed-delay.delay: 10s
+
+# Web UI
+rest.port: 8081
+rest.address: 0.0.0.0
