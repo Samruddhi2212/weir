@@ -31,8 +31,16 @@ jobs:
         run: python scripts/sync_benchmark_readme.py --check
 
   test:
+    # Was two jobs (a Docker-less "test" that always failed with pytest
+    # exit 5 - no tests existed - and "integration", which ran
+    # smoke_test.sh directly, bypassing pytest entirely). Merged once
+    # tests/unit/test_sync_benchmark_readme.py and tests/integration/
+    # test_smoke.py existed for real: the integration test needs the
+    # live stack, so it has to run where the stack is up, and there's no
+    # reason to run the stack twice for two separate test jobs.
     name: Test suite (C5)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -40,23 +48,10 @@ jobs:
           python-version: "3.12"
       - name: Install pytest
         run: pip install pytest
-      - name: Run tests
-        # No modules or tests exist yet, so this currently fails with
-        # pytest exit 5 ("no tests collected"). That's expected: CLAUDE.md
-        # C5 says CI runs every test and untested code is not done - this
-        # job goes green only once real code and tests land together.
-        run: pytest -q tests/
-
-  integration:
-    name: Integration smoke test - steps 2-5 (C5)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
       - name: Start stack
         run: docker compose up -d --build
-      - name: Run smoke test (steps 2-5)
-        run: bash scripts/smoke_test.sh
+      - name: Run tests (unit + integration)
+        run: pytest -q tests/
       - name: Show service logs on failure
         if: failure()
         run: docker compose logs
