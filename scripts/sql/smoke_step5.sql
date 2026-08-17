@@ -15,6 +15,10 @@
 -- that's a real finding, not a bug in this file.
 
 SET 'execution.runtime-mode' = 'batch';
+-- Required, not optional, for the final SELECT below when run via
+-- `sql-client.sh -f` (non-interactive) - see smoke_step4.sql's comment
+-- and DEFENSE.md #16.
+SET 'sql-client.execution.result-mode' = 'TABLEAU';
 
 CREATE CATALOG IF NOT EXISTS weir_smoke_catalog WITH (
   'type' = 'iceberg',
