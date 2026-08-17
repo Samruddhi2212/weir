@@ -63,7 +63,11 @@ def render_block(result_file: Path | None) -> str:
         detection_rate = s.get("detection_rate")
         fp_rate = s.get("false_positive_rate")
         latency_ms = s.get("detection_latency_ms")
-        dr = f"{detection_rate * 100:.1f}%" if isinstance(detection_rate, (int, float)) else "n/a"
+        dr = (
+            f"{detection_rate * 100:.1f}%"
+            if isinstance(detection_rate, (int, float))
+            else "n/a"
+        )
         fp = f"{fp_rate * 100:.1f}%" if isinstance(fp_rate, (int, float)) else "n/a"
         lat = str(latency_ms) if latency_ms is not None else "n/a"
         lines.append(f"| {name} | {dr} | {fp} | {lat} |")
@@ -105,7 +109,9 @@ def main() -> None:
 
     README.write_text(updated_text, encoding="utf-8")
     result = newest_result_file()
-    print(f"README.md benchmark block updated from {result.name if result else 'no result file'}.")
+    print(
+        f"README.md benchmark block updated from {result.name if result else 'no result file'}."
+    )
 
 
 if __name__ == "__main__":
