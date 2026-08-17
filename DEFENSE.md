@@ -20,7 +20,7 @@ This means the Flink checkpoint interval is **not** the detection-latency
 floor for anything Sprint 1 actually ships. It only bounds staleness for the
 one detector that reads committed Iceberg data, and that detector doesn't
 exist yet. Given that, checkpoint interval was set to `60s`
-(`execution.checkpointing.interval`, in `config/flink/flink-conf.yaml` via
+(`execution.checkpointing.interval`, in `config/flink/config.yaml` via
 the `WEIR_CHECKPOINT_INTERVAL` env var) for file sizing and recovery-window
 reasons instead: 60s produces reasonably sized checkpoints/Parquet files
 without checkpointing so rarely that a TaskManager failure replays an

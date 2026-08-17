@@ -40,4 +40,4 @@ directories or files exist for these.
 
 - **Sensitivity sweep** — the checkpoint interval is already read from an
   env var (`WEIR_CHECKPOINT_INTERVAL`) specifically so this can be explored
-  later without touching `config/flink/flink-conf.yaml`. See DEFENSE.md #1.
+  later without touching `config/flink/config.yaml`. See DEFENSE.md #1.

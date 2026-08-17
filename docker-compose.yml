@@ -128,16 +128,22 @@ services:
       - "${FLINK_JOBMANAGER_UI_PORT:-8081}:8081"
       - "${FLINK_JOBMANAGER_RPC_PORT:-6123}:6123"
     environment:
-      # Appended to conf/flink-conf.yaml by the image's entrypoint at
+      # Appended to conf/config.yaml by the image's entrypoint at
       # container start. Lets the sensitivity sweep vary checkpoint
-      # interval without editing config/flink/flink-conf.yaml. See
+      # interval without editing config/flink/config.yaml. See
       # DEFENSE.md #1.
+      #
+      # The conf mount below is NOT :ro: the entrypoint's config-parser-
+      # utils.sh needs to write into it to merge FLINK_PROPERTIES in.
+      # Confirmed by a crash: read-only produced "Read-only file system"
+      # from config-parser-utils.sh, matching a known upstream issue
+      # (GoogleCloudPlatform/flink-on-k8s-operator#213).
       FLINK_PROPERTIES: |
         execution.checkpointing.interval: ${WEIR_CHECKPOINT_INTERVAL:-60s}
     volumes:
       - flink-checkpoints:/tmp/flink-checkpoints
       - flink-savepoints:/tmp/flink-savepoints
-      - ./config/flink:/opt/flink/conf:ro
+      - ./config/flink:/opt/flink/conf
     command: jobmanager
     depends_on:
       kafka:
@@ -171,7 +177,7 @@ services:
     volumes:
       - flink-checkpoints:/tmp/flink-checkpoints
       - flink-savepoints:/tmp/flink-savepoints
-      - ./config/flink:/opt/flink/conf:ro
+      - ./config/flink:/opt/flink/conf
     command: taskmanager
     depends_on:
       flink-jobmanager:

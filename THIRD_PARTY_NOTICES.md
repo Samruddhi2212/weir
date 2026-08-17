@@ -11,7 +11,7 @@ satisfies that condition for the adapted portions listed in PROVENANCE.md.
 
 Source: https://github.com/DiogoRibeiro7/streaming-lakehouse-lab
 Commit: 770189b05beca6f8a14e5fb6e45940ddc321847f (2026-08-15)
-Adapted: config/flink/flink-conf.yaml (checkpointing / state backend block)
+Adapted: config/flink/config.yaml (checkpointing / state backend block)
 
 ```
 MIT License
