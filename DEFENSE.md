@@ -250,3 +250,98 @@ the material you're adapting from used it - Flink 2.0 is a genuine
 breaking change here, not a deprecation warning reference/ would have
 caught either, since reference/ was never actually run against Flink
 2.1.0 in this form.
+
+## 14. A test that passes for the wrong reason is worse than no test
+
+Step 5's row-count check was `grep -qE '\b2\b'` against the *entire*
+captured stdout+stderr of the sql-client invocation - "does the digit 2
+appear anywhere in this output." It does, almost unconditionally: jar
+version strings like `flink-table-api-java-uber-2.1.0.jar` appear in
+essentially any Flink stack trace, error or not, and `\b2\b` matches the
+`2` in `2.1.0` (the dot on either side is a non-word character, so it's a
+word boundary). A run that printed `PASS: step 5 - wrote 2 rows to
+Iceberg, count verified` had, in fact, verified nothing about row count -
+it had verified that Flink's own version number appeared in the log,
+which it always does.
+
+This was caught by contradiction, not inspection: Iceberg 1.11.0's
+`FlinkCatalogFactory.createCatalogLoader()` accepts exactly `hive`,
+`hadoop`, or `rest` for `catalog-type`, with a `default` branch that
+unconditionally throws `UnsupportedOperationException` for anything else
+- `jdbc` (what this project's catalog config uses) has never been a
+valid value, under any condition, in that source. A run that used the
+identical committed config nonetheless printed a clean pass. The two
+facts don't fit together. Direct re-inspection of that run's saved raw
+log confirmed zero occurrences of `UnsupportedOperationException` or
+`Unknown catalog-type` anywhere in it - so the assertion bug wasn't
+masking that specific error in that run, but it was never actually
+capable of catching it, or anything else, either.
+
+Step 4 had a milder version of the same class of bug:
+`[ -n "$STEP4_OUTPUT" ]` ("did the process print anything at all") is
+nearly tautological, since Flink's SQL Client prints substantial banner
+and log output regardless of whether the query underneath succeeded.
+
+Fixed by making both queries emit a sentinel-prefixed value instead of a
+bare one - `CONCAT('WEIR_ROW_COUNT=', CAST(COUNT(*) AS STRING))` and
+`CONCAT('WEIR_MSG=', message)` - so the shell side can `grep -oE` the
+exact literal prefix, parse the value after it, and compare it exactly
+(`= "2"`, count of matches `= "5"`) rather than pattern-match loosely
+against unrelated content. Both now also explicitly fail if the marker
+doesn't appear at all, rather than treating "empty" as an implicit pass.
+
+Why this gets its own entry rather than being folded into the fix commit:
+a false-positive test is a worse failure mode than a missing test. A
+missing test is a known, visible gap - nobody can point to it and claim
+step 5 is verified. A test that reports PASS while checking nothing
+manufactures false confidence, and every fix built on top of that
+confidence (this project was about to move on to building step 6 on the
+assumption that step 5 was solid) inherits the same unearned certainty.
+The discipline this argues for: when a check's *positive* case can't be
+falsified by a wrong answer, the check isn't verifying that case, however
+often it happens to be right.
+
+## 15. Digest-pinning every image, and capturing the jar manifest on every run
+
+Prompted by the same step-5 inconsistency as #14, but addressing a
+different, still-not-fully-ruled-out hypothesis: two CI runs against an
+unchanged `docker/flink/Dockerfile` produced different outcomes for the
+identical `catalog-type='jdbc'` config. Fixing the assertion bug (#14)
+means the failing run's result is now trustworthy - but it doesn't by
+itself explain why an earlier run differed, since that earlier run's own
+assertion, though broken, wasn't concealing this specific error (verified
+directly against its saved log - see #14).
+
+One remaining, concrete, checkable explanation: every image in this
+project, including the `flink:2.1.0-java21` base in `docker/flink/
+Dockerfile`, was pinned by tag only. A tag is not a stable identifier -
+the same tag can be repushed with different underlying content later,
+and neither `docker-compose.yml` nor the Dockerfile would show any
+difference in that case, even though the actual bytes pulled could
+differ between two runs on two different days. This isn't a hypothetical
+concern specific to Flink; it's a general property of registry tags, and
+"pin every Docker image to an explicit version" (CLAUDE.md C4) was never
+actually enforced to the standard that rules it out, only to the weaker
+standard of "not `:latest`."
+
+Fixed by resolving each image's current manifest digest directly from
+Docker Hub's registry API (not assumed, not copied from a build log) and
+pinning `image:tag@sha256:digest` - Docker's supported combined form,
+where the digest determines what's actually pulled and the tag stays for
+human readability. Strengthened `scripts/check_pinned_images.sh` (C4) to
+require this for every pulled image (excluding `weir/*`, which are built
+locally from this repo's own Dockerfile and have no external digest to
+pin against - their reproducibility comes from the pinned base image and
+pinned jar versions inside the build, not from the resulting local image
+having one). Also added an unconditional (not failure-only) CI step that
+captures `ls -la /opt/flink/lib/` and `sha256sum` of every jar in it on
+every run, so that if this inconsistency recurs, the actual jar content
+of the passing and failing runs can be diffed directly against each
+other, rather than reasoned about from the outside.
+
+Digest-pinning removes the mutable-tag hypothesis as a possible
+explanation going forward. It does not, by itself, prove that mutable
+tags caused the *original* inconsistency - that would require having
+captured both runs' jar manifests at the time, which this project didn't
+do until now. Recorded as ruled out prospectively, not retroactively
+confirmed.

@@ -139,7 +139,17 @@ $STEP4_OUTPUT"
 fi
 [ "$STEP4_EXIT" -eq 0 ] || fail "step 4: sql-client exited $STEP4_EXIT. Full output:
 $STEP4_OUTPUT"
-[ -n "$STEP4_OUTPUT" ] || fail "step 4: sql-client produced no output at all"
+
+# Exact count of the sentinel marker, not "any output at all" (that was
+# nearly tautological - sql-client prints substantial banner/log output
+# whether or not the query actually returned anything). LIMIT 5 means
+# exactly 5 is the only correct answer; 0 means the query errored or
+# returned nothing without tripping the exit-code/error-pattern checks
+# above, and must fail here instead of passing silently (see DEFENSE.md
+# #14).
+STEP4_MATCHED="$(echo "$STEP4_OUTPUT" | grep -oE 'WEIR_MSG=[0-9]+' | wc -l | tr -d '[:space:]')"
+[ "$STEP4_MATCHED" = "5" ] || fail "step 4: expected 5 tagged messages, got $STEP4_MATCHED. Full output:
+$STEP4_OUTPUT"
 echo "PASS: step 4 - Flink read from Kafka, no classpath errors"
 
 # ------------------------------------------------------------
@@ -175,17 +185,36 @@ rm -f "$STEP5_SQL_RESOLVED"
 STEP5_OUTPUT="$(docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /tmp/weir_smoke_step5_resolved.sql 2>&1)"
 STEP5_EXIT=$?
 
-if echo "$STEP5_OUTPUT" | grep -qE 'AccessDenied|403 Forbidden|Connection refused|ClassNotFoundException|NoClassDefFoundError|SQLException'; then
+# This list is a diagnostic aid, not the actual safety net - the
+# exit-code check below is what genuinely catches failures (confirmed:
+# an "Unknown catalog-type" DDL error was caught by the exit-code check
+# alone, this list didn't recognize it and had to be extended after the
+# fact - see DEFENSE.md #14). Kept and extended anyway for a clearer
+# failure message than a bare nonzero exit code would give.
+if echo "$STEP5_OUTPUT" | grep -qE 'AccessDenied|403 Forbidden|Connection refused|ClassNotFoundException|NoClassDefFoundError|SQLException|UnsupportedOperationException'; then
   fail "step 5: catalog/S3/JDBC error writing to Iceberg. Full output:
 $STEP5_OUTPUT"
 fi
 [ "$STEP5_EXIT" -eq 0 ] || fail "step 5: sql-client exited $STEP5_EXIT. Full output:
 $STEP5_OUTPUT"
-if ! echo "$STEP5_OUTPUT" | grep -qE '\b2\b'; then
-  fail "step 5: could not confirm row_count=2 in output. Full output:
+
+# Exact comparison against a parsed row count, not "does '2' appear
+# anywhere" - that previously matched bare digits inside jar version
+# strings like "flink-table-api-java-uber-2.1.0.jar", which appear in
+# essentially any Flink stack trace, error or not (see DEFENSE.md #14).
+# An errored/empty query must fail here, not pass because some unrelated
+# "2" happened to be in the output.
+STEP5_PARSED_COUNT="$(echo "$STEP5_OUTPUT" | grep -oE 'WEIR_ROW_COUNT=[0-9]+' | head -1 | sed -E 's/WEIR_ROW_COUNT=//')"
+if [ -z "$STEP5_PARSED_COUNT" ]; then
+  fail "step 5: query produced no WEIR_ROW_COUNT marker at all - an
+errored or empty query must fail, not pass silently. Full output:
 $STEP5_OUTPUT"
 fi
-echo "PASS: step 5 - wrote 2 rows to Iceberg, count verified"
+if [ "$STEP5_PARSED_COUNT" != "2" ]; then
+  fail "step 5: expected row count 2, got '$STEP5_PARSED_COUNT'. Full output:
+$STEP5_OUTPUT"
+fi
+echo "PASS: step 5 - wrote 2 rows to Iceberg, count verified ($STEP5_PARSED_COUNT)"
 
 echo ""
 echo "=== Steps 2-5 all passed ==="

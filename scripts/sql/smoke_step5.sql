@@ -36,4 +36,10 @@ USE smoke_test;
 DROP TABLE IF EXISTS smoke_iceberg_table;
 CREATE TABLE smoke_iceberg_table (message STRING) WITH ('format-version' = '2');
 INSERT INTO smoke_iceberg_table VALUES ('smoke-row-1'), ('smoke-row-2');
-SELECT COUNT(*) AS row_count FROM smoke_iceberg_table;
+-- Sentinel-prefixed, not a bare COUNT(*): smoke_test.sh parses the exact
+-- literal 'WEIR_ROW_COUNT=' prefix and compares the number after it to
+-- "2" exactly. A bare digit here previously matched ANY "2" anywhere in
+-- the whole captured output, including inside jar version strings like
+-- "flink-table-api-java-uber-2.1.0.jar" - which is how a genuinely
+-- broken query once "passed" (see DEFENSE.md #14).
+SELECT CONCAT('WEIR_ROW_COUNT=', CAST(COUNT(*) AS STRING)) AS row_count_marker FROM smoke_iceberg_table;

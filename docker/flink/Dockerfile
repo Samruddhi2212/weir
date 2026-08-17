@@ -28,8 +28,14 @@
 # 3.4.3, not Maven Central's newest (3.5.0) - 3.4.3 is what Iceberg
 # 1.11.0 itself is built against (gradle/libs.versions.toml: hadoop3 =
 # "3.4.3"), verified rather than assumed.
+#
+# Base image pinned to tag@digest, not just the tag - a tag is mutable
+# (the same tag can be repushed with different content later), which
+# left open a real, unresolved hypothesis for a step-5 inconsistency
+# between two otherwise-identical CI runs. Digest resolved from Docker
+# Hub's registry API on 2026-08-17 (see DEFENSE.md #15).
 
-FROM flink:2.1.0-java21
+FROM flink:2.1.0-java21@sha256:11d31310a00763e0927325c6fcfe65961c9170c05ce421b9458b923004e95895
 
 ARG ICEBERG_VERSION=1.11.0
 ARG KAFKA_CONNECTOR_VERSION=4.0.1-2.0
