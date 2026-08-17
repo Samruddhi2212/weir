@@ -1,0 +1,45 @@
+# Weir
+
+Streaming data reliability platform. Detects, localizes, and explains data
+incidents.
+
+**Differentiator:** publishes measured detection rate, false-positive rate,
+and detection latency against injected failures, benchmarked against a
+reproducible failure catalog. No comparable OSS project does this.
+
+No performance numbers are published in this README, and none will be added
+speculatively. Detection rate, false-positive rate, and detection latency
+appear here only after `benchmarks/run_benchmark.py` has actually been run —
+see CLAUDE.md rule 1.
+
+## Status
+
+Sprint 1 is in progress. Infrastructure (Kafka, PostgreSQL, SeaweedFS,
+Flink, via Docker Compose) is scaffolded. The detection engine, lineage,
+and benchmark harness are not yet built.
+
+See [docs/FUTURE_WORK.md](docs/FUTURE_WORK.md) for what's explicitly out of
+Sprint 1 scope, and why.
+
+## Lineage: declared, not runtime-emitted, in v1
+
+**v1 ships declared, static lineage — not jobs instrumented to emit
+lineage events at execution time.** Runtime lineage emission is deferred
+(see docs/FUTURE_WORK.md); when it ships, its event shape is modeled on the
+OpenLineage spec (see PROVENANCE.md's design references).
+
+This is the fallback CLAUDE.md rule 7 requires be disclosed here, not just
+in internal docs.
+
+## Stack and rules
+
+See [CLAUDE.md](CLAUDE.md) for the locked stack and the hard rules this
+project is built under, and [DEFENSE.md](DEFENSE.md) for the running log of
+design decisions, alternatives, and tradeoffs behind it.
+
+## Provenance
+
+Portions of this repository are adapted from
+[streaming-lakehouse-lab](https://github.com/DiogoRibeiro7/streaming-lakehouse-lab)
+(MIT). See [PROVENANCE.md](PROVENANCE.md) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

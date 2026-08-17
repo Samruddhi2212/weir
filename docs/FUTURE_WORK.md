@@ -35,8 +35,8 @@ directories or files exist for these.
   needs every ingestion/streaming job instrumented against an event shape
   (see PROVENANCE.md's OpenLineage design reference), which is a larger
   integration surface than Sprint 1's timeline allows. CLAUDE.md rule 7
-  requires this fallback be marked in the README, not just here — **not yet
-  satisfied**, since no README.md exists in this repo yet.
+  requires this fallback be marked in the README, not just here — see
+  README.md's "Lineage: declared, not runtime-emitted" section.
 
 - **Sensitivity sweep** — the checkpoint interval is already read from an
   env var (`WEIR_CHECKPOINT_INTERVAL`) specifically so this can be explored
