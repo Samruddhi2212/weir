@@ -73,19 +73,24 @@ echo "PASS: step 2 - all 5 services healthy"
 echo ""
 echo "=== Step 3: Kafka round-trip (produce 10, consume 10) ==="
 
-docker compose exec -T kafka kafka-topics.sh \
+# Bare script names are not resolvable here - /opt/kafka/bin is not on
+# PATH in apache/kafka:4.1.0 (confirmed via CI debug job: `which
+# kafka-broker-api-versions.sh` returned exit=1 even though the script
+# exists and works fine by absolute path). Same fix as the kafka
+# healthcheck in docker-compose.yml.
+docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh \
   --bootstrap-server localhost:9092 --delete --topic "$TEST_TOPIC" >/dev/null 2>&1 || true
 
-docker compose exec -T kafka kafka-topics.sh \
+docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh \
   --bootstrap-server localhost:9092 \
   --create --topic "$TEST_TOPIC" --partitions 1 --replication-factor 1 \
   || fail "step 3: could not create topic $TEST_TOPIC"
 
-seq 1 10 | docker compose exec -T kafka kafka-console-producer.sh \
+seq 1 10 | docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh \
   --bootstrap-server localhost:9092 --topic "$TEST_TOPIC" \
   || fail "step 3: producer failed"
 
-RECEIVED="$(docker compose exec -T kafka kafka-console-consumer.sh \
+RECEIVED="$(docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server localhost:9092 --topic "$TEST_TOPIC" \
   --from-beginning --max-messages 10 --timeout-ms 15000 2>/dev/null \
   | wc -l | tr -d '[:space:]')"
