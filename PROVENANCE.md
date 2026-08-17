@@ -2,9 +2,11 @@
 
 ## Adapted from streaming-lakehouse-lab (MIT, 770189b05beca6f8a14e5fb6e45940ddc321847f, 2026-08-15)
 
-- config/flink/flink-conf.yaml — checkpointing and state backend block,
-  adapted from infra/flink/conf/flink-conf.yaml with modified checkpoint
-  interval (see DEFENSE.md #1)
+- config/flink/config.yaml — checkpointing and state backend block, adapted
+  from infra/flink/conf/flink-conf.yaml with modified checkpoint interval
+  (see DEFENSE.md #1). Renamed from flink-conf.yaml to config.yaml after a
+  runtime crash confirmed Flink 2.0+ no longer reads the legacy filename at
+  all (FLIP-366) - not just a naming preference.
 - docker/flink/Dockerfile — Flink core version (2.1.0) and Iceberg version
   choice informed by build.gradle.kts's `flinkVersion`/`icebergVersion`
   pins, but re-verified against Maven Central rather than copied as-is:
