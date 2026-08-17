@@ -116,7 +116,10 @@ services:
   # Flink JobManager
   # ------------------------------------------------------------
   flink-jobmanager:
-    image: flink:2.1.0-java21
+    image: weir/flink-iceberg:2.1.0-1.11.0
+    build:
+      context: ./docker/flink
+      dockerfile: Dockerfile
     container_name: weir-flink-jobmanager
     hostname: flink-jobmanager
     networks:
@@ -154,7 +157,10 @@ services:
   # Flink TaskManager
   # ------------------------------------------------------------
   flink-taskmanager:
-    image: flink:2.1.0-java21
+    image: weir/flink-iceberg:2.1.0-1.11.0
+    build:
+      context: ./docker/flink
+      dockerfile: Dockerfile
     container_name: weir-flink-taskmanager
     hostname: flink-taskmanager
     networks:

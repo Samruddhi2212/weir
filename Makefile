@@ -1,7 +1,7 @@
 .PHONY: up down logs seed test
 
-up: ## Start all services (detached)
-	docker compose up -d
+up: ## Start all services (detached), rebuilding the Flink image if changed
+	docker compose up -d --build
 
 down: ## Stop all services and remove volumes
 	docker compose down -v
