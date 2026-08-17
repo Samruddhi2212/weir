@@ -144,6 +144,10 @@ services:
       - flink-checkpoints:/tmp/flink-checkpoints
       - flink-savepoints:/tmp/flink-savepoints
       - ./config/flink:/opt/flink/conf
+      # Committed, reviewable SQL fixtures (see DEFENSE.md #10) - read-only
+      # is fine here, unlike the conf mount above, since nothing needs to
+      # write into it.
+      - ./scripts/sql:/opt/weir/sql:ro
     command: jobmanager
     depends_on:
       kafka:

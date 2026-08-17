@@ -80,3 +80,35 @@ say anything other than what the newest actual result file contains,
 because the table is generated from that file's content, not typed by
 hand. A number that wasn't computed by the sync script from a real result
 file doesn't appear in the table at all.
+
+## 10. Host->container file permissions: the Flink image runs as non-root
+
+Chose: any file crossing the host->container boundary into the Flink
+image must be world-readable (or explicitly chowned to match the
+container's runtime user) at the point of creation, not fixed up after
+the fact. In `scripts/smoke_test.sh` this is `make_readable_tmp()` -
+`mktemp` followed immediately by `chmod 644`, used for any future
+runtime-generated file that needs to reach this container.
+
+Alternative rejected (found the hard way, not anticipated): create temp
+files with `mktemp`'s default mode (600, owner-only) and copy them in via
+`docker compose cp`. This is what smoke test steps 4 and 5 originally
+did, and it broke: `docker compose cp` preserves the source file's
+permission bits into the container, and `docker/flink/Dockerfile` ends
+with `USER flink` (non-root) - a mode-600 file is unreadable by that user
+regardless of which UID actually ends up owning it after the copy.
+Confirmed via an actual sql-client crash, not inferred:
+`FileNotFoundException: /tmp/weir_smoke_step4.sql (Permission denied)`
+immediately after the log showed the same file being copied successfully.
+
+Tradeoff / why this is recorded rather than just fixed silently: this
+isn't specific to one script, and it will recur. Any future job, tool, or
+CI step that stages a file into this Flink image hits the same wall
+unless it either (a) chmods to world-readable at creation, or (b) avoids
+the host->container copy entirely. Steps 4 and 5 actually ended up doing
+(b): their SQL turned out to be static, not templated, so it moved to
+committed files in `scripts/sql/`, bind-mounted read-only at
+`/opt/weir/sql` - reviewable DDL in git, not generated at runtime. (a) -
+`make_readable_tmp()` - stays in the script for whatever does need a
+runtime-generated file later, e.g. step 6's exactly-once verification
+script.
