@@ -52,3 +52,31 @@ number now.
 ## 7. False-positive tolerance and operating point
 
 ## 8. What the benchmark missed and why
+
+## 9. Benchmark-metrics guard: narrow negative check + positive sync check
+
+Chose: narrow `scripts/check_no_metrics_in_markdown.sh` to only flag the
+specific phrases "detection rate", "false positive rate" / "false-positive
+rate", "detection latency", and "throughput" when followed by a number,
+outside `benchmarks/results/`. Paired with a positive guarantee:
+`scripts/sync_benchmark_readme.py`, which regenerates the README's
+benchmark table directly from the newest `benchmarks/results/*.json`, plus
+a CI job that fails if the committed block doesn't match a fresh
+regeneration.
+
+Alternative rejected: keep the original broad check — any percentage or
+latency-shaped number, anywhere in markdown outside `benchmarks/results/`.
+Rejected because it produced false positives on legitimate content: this
+file's own entry #1 discusses checkpoint-interval values ("60s", "30s"),
+which are config, not a detection-performance claim — but a blunt regex
+can't tell the difference between the two.
+
+Tradeoff: the narrowed negative check is now weaker standing alone — a
+fabricated number that avoids those exact phrases would slip past it. That
+weakness is deliberate, not overlooked: the negative check is a cheap
+backstop, not the real guarantee. The real guarantee is the sync script —
+it makes it structurally impossible for the README's benchmark table to
+say anything other than what the newest actual result file contains,
+because the table is generated from that file's content, not typed by
+hand. A number that wasn't computed by the sync script from a real result
+file doesn't appear in the table at all.

@@ -16,6 +16,19 @@ jobs:
         run: bash scripts/check_no_gap_markers.sh
       - name: Docker images pinned (C4)
         run: bash scripts/check_pinned_images.sh
+      - name: No fabricated detection-performance numbers (DEFENSE.md #9)
+        run: bash scripts/check_no_metrics_in_markdown.sh
+
+  benchmark-readme-sync:
+    name: README benchmark table matches latest results
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check README benchmark block is not stale
+        run: python scripts/sync_benchmark_readme.py --check
 
   test:
     name: Test suite (C5)

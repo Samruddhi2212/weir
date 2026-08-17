@@ -1,4 +1,26 @@
 repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        name: "benchmarks/results raw dumps under 1MB"
+        args: ["--maxkb=1024"]
+        files: '^benchmarks/results/.*\.json$'
+
+  # New dependency, not previously discussed - flagging per CLAUDE.md rule
+  # 6. ruff is the formatter+linter choice for Python, matching what
+  # FastAPI/pytest already imply about the stack. Say so if you want a
+  # different tool instead.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
   - repo: local
     hooks:
       - id: no-gap-markers
@@ -11,6 +33,20 @@ repos:
       - id: docker-images-pinned
         name: "CLAUDE.md C4 - every Docker image pinned, no :latest"
         entry: scripts/check_pinned_images.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: no-metrics-in-markdown
+        name: "No fabricated detection-performance numbers in markdown (DEFENSE.md #9)"
+        entry: scripts/check_no_metrics_in_markdown.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: sync-benchmark-readme
+        name: "Regenerate README benchmark table from benchmarks/results/"
+        entry: python scripts/sync_benchmark_readme.py
         language: system
         pass_filenames: false
         always_run: true

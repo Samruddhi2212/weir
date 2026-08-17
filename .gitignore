@@ -1,0 +1,56 @@
+# ============================================================
+# Python
+# ============================================================
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+
+# ============================================================
+# Java / Gradle
+# ============================================================
+.gradle/
+**/build/
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+# ============================================================
+# Terraform
+# ============================================================
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+
+# ============================================================
+# Docker
+# ============================================================
+.env
+docker-compose.override.yml
+
+# ============================================================
+# Data caches / notebook checkpoints
+# ============================================================
+.ipynb_checkpoints/
+.cache/
+*.duckdb
+
+# ============================================================
+# benchmarks/results raw dumps
+# ============================================================
+# .gitignore has no file-size predicate - it can only match paths/globs,
+# not "larger than 1MB". That limit on benchmarks/results/*.json is
+# enforced instead by the check-added-large-files pre-commit hook (see
+# .pre-commit-config.yaml), which blocks the commit outright rather than
+# silently hiding the file. Small, real result summaries stay trackable;
+# oversized raw dumps get rejected at commit time, not ignored.

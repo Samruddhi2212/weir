@@ -1,0 +1,17 @@
+# Normalize line endings for all text files. Fixes the CRLF/LF churn
+# warnings seen when committing from Windows and prevents whole-file diffs
+# caused by line-ending changes alone.
+* text=auto
+
+# Notebooks: opaque for diff purposes, collapsed by default in GitHub's PR
+# view instead of reviewed cell-by-cell as if hand-written.
+*.ipynb -diff linguist-generated=true
+
+# Lock files are machine-generated; don't review them line-by-line.
+*.lock linguist-generated=true
+poetry.lock linguist-generated=true
+package-lock.json linguist-generated=true
+.terraform.lock.hcl linguist-generated=true
+
+# Benchmark results are machine-produced, not hand-written.
+benchmarks/results/*.json linguist-generated=true
