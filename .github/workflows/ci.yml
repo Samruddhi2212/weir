@@ -74,7 +74,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Show configured Kafka healthcheck settings from docker-compose.yml
-        run: sed -n '/^  kafka:/,/^  # ----/p' docker-compose.yml
+        continue-on-error: true
+        run: |
+          sed -n '/^  kafka:/,/^  # ----/p' docker-compose.yml
       - name: Start Kafka only
         run: docker compose up -d kafka
       - name: Wait for Kafka's own startup (not for Docker health)
