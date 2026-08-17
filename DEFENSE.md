@@ -345,3 +345,42 @@ tags caused the *original* inconsistency - that would require having
 captured both runs' jar manifests at the time, which this project didn't
 do until now. Recorded as ruled out prospectively, not retroactively
 confirmed.
+
+## 16. sql-client.sh -f requires an explicit result-mode for non-interactive SELECT
+
+The very first re-run attempting to actually verify #14's fix failed
+before step 5 ever ran, at step 4, with a new error the CONCAT-wrapped
+query had never hit before:
+
+```
+org.apache.flink.table.client.gateway.SqlExecutionException: In
+non-interactive mode, it only supports to use TABLEAU as value of
+sql-client.execution.result-mode when execute query. Please add 'SET
+sql-client.execution.result-mode=TABLEAU;' in the sql file.
+```
+
+Checked before assuming the fix: did the earlier, genuinely-passing run
+(the one #14/#15 already re-inspected directly) hit this too, silently
+swallowed by the old weak assertion? Re-grepped that saved log for
+`SqlExecutionException`/`result-mode` - zero occurrences. So this isn't
+the same masked bug recurring; it's a real difference in behavior
+between a bare `SELECT * ...` (which the earlier run used and which
+apparently doesn't require an explicit result-mode) and the sentinel-
+wrapped `SELECT CONCAT(...)` query introduced by the #14 fix, run through
+the identical `sql-client.sh -f` / non-interactive mechanism both times.
+
+Fixed exactly as the error message itself prescribes: added `SET
+'sql-client.execution.result-mode' = 'TABLEAU';` to both
+`scripts/sql/smoke_step4.sql` and `smoke_step5.sql`, the latter alongside
+its existing `SET 'execution.runtime-mode' = 'batch';`.
+
+Why this matters for the still-open #14/#15 investigation, not just as
+its own bug: it's a second, independent case of a SELECT query's success
+depending on a setting that wasn't explicit before - one more concrete,
+confirmed reason a query can behave differently across two runs that
+look identical from the SQL's WITH()-clause content alone. It does not
+explain the original catalog-type inconsistency (a completely different
+exception, at catalog-creation time, before any SELECT executes), but it
+reinforces the same posture #15 already argued for: state every
+execution-mode assumption explicitly in the SQL itself, rather than
+relying on whatever Flink's client happens to default to.

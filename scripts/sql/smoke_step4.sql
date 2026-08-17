@@ -5,6 +5,13 @@
 -- Topic and group id are plain literals, not templated: this file is
 -- static (see DEFENSE.md #10) and must match TEST_TOPIC/KAFKA_GROUP in
 -- scripts/smoke_test.sh if either ever changes.
+--
+-- result-mode is required, not optional, when running a SELECT via
+-- `sql-client.sh -f` (non-interactive) - without it, Flink throws
+-- SqlExecutionException: "In non-interactive mode, it only supports to
+-- use TABLEAU as value of sql-client.execution.result-mode". Confirmed
+-- by hitting this directly in CI (see DEFENSE.md #16).
+SET 'sql-client.execution.result-mode' = 'TABLEAU';
 
 CREATE TABLE IF NOT EXISTS smoke_kafka_source (
   message STRING
