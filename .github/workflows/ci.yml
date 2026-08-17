@@ -63,3 +63,39 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose down -v
+
+  debug-kafka-healthcheck:
+    # TEMPORARY - diagnosing why Kafka's healthcheck never passes even
+    # though Kafka's own logs show a clean startup. Remove this job once
+    # the root cause is confirmed. Not gating anything; informational only.
+    name: "DEBUG - Kafka healthcheck (temporary)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show configured Kafka healthcheck settings from docker-compose.yml
+        run: sed -n '/^  kafka:/,/^  # ----/p' docker-compose.yml
+      - name: Start Kafka only
+        run: docker compose up -d kafka
+      - name: Wait for Kafka's own startup (not for Docker health)
+        run: sleep 15
+      - name: DEBUG - exec diagnostics inside the Kafka container
+        run: |
+          docker compose exec -T kafka sh -c '
+            echo "=== 1. ls -la /opt/kafka/bin/ ===";
+            ls -la /opt/kafka/bin/ | head -30;
+            echo "";
+            echo "=== 2. which kafka-broker-api-versions.sh ===";
+            which kafka-broker-api-versions.sh;
+            echo "exit=$?";
+            echo "";
+            echo "=== 3. PATH ===";
+            echo "$PATH";
+            echo "";
+            echo "=== 4. time kafka-broker-api-versions.sh (absolute path) ===";
+            time /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092;
+            echo "exit=$?";
+          '
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
