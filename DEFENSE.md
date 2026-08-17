@@ -120,15 +120,44 @@ before this was ever run: whether `flink-sql-connector-kafka`'s `-2.0`
 build would load against a 2.1.0 cluster. It did - smoke test step 4
 (Flink reads Kafka, no Iceberg) passes clean in CI. The dependency that
 actually broke was a different one, assumed away entirely rather than
-flagged: Iceberg's `FlinkCatalogFactory.createCatalog()` calls
-`clusterHadoopConf()` unconditionally (confirmed from Iceberg 1.11.0's
-own source - no branch on catalog-type or io-impl), so S3FileIO does not
-avoid needing `org.apache.hadoop.conf.Configuration` on the classpath the
-way "S3FileIO exists partly so Hadoop isn't needed" was assumed to mean.
+flagged.
+
+The exact failure, from `CREATE CATALOG ... WITH ('catalog-type'='jdbc',
+'io-impl'='...S3FileIO', ...)`:
+
+```
+Caused by: java.lang.NoClassDefFoundError: org/apache/hadoop/conf/Configuration
+    at org.apache.iceberg.flink.FlinkCatalogFactory.clusterHadoopConf(FlinkCatalogFactory.java:214)
+    at org.apache.iceberg.flink.FlinkCatalogFactory.createCatalog(FlinkCatalogFactory.java:141)
+Caused by: java.lang.ClassNotFoundException: org.apache.hadoop.conf.Configuration
+```
+
+Before adding anything, checked Iceberg 1.11.0's own source for
+`FlinkCatalogFactory.createCatalog()`:
+
+```java
+public Catalog createCatalog(Context context) {
+    return createCatalog(context.getName(), context.getOptions(), clusterHadoopConf());
+}
+```
+
+`clusterHadoopConf()` is called unconditionally - no branch on
+catalog-type or io-impl. That answers the question directly: it's the
+catalog factory requesting the class, not Iceberg's FileIO and not
+Flink's own filesystem layer, and S3FileIO does not avoid it, because the
+call happens before FileIO is ever consulted. This is also a known,
+still-open upstream limitation (`apache/iceberg#7332`, "Flink: Make
+Hadoop an optional dependency") - not something introduced by this setup
+and not something a config flag turns off.
+
 Fixed by adding Hadoop 3.x's shaded `hadoop-client-api`/`hadoop-client-
-runtime`, pinned to 3.4.3 - verified against Iceberg 1.11.0's own
-`gradle/libs.versions.toml`, not assumed from Maven Central's newest
-(3.5.0).
+runtime` (the minimal-footprint pair that supplies the one needed class
+without unshaded `hadoop-common`'s full transitive dependency chain),
+pinned to 3.4.3 - verified against Iceberg 1.11.0's own
+`gradle/libs.versions.toml` (`hadoop3 = "3.4.3"`), not assumed from Maven
+Central's newest (3.5.0). Mixing an unverified newer Hadoop build against
+an older-tested Iceberg release is exactly how shaded-jar conflicts
+resurface silently.
 
 Why this is recorded rather than just fixed and moved on: it's evidence
 about *where* dependency risk actually lives in this stack, not just a
@@ -141,3 +170,83 @@ in this stack, a successful build and even a passing earlier layer (step
 4) say nothing about whether the next layer (step 5) works. Each
 dependency boundary has to be verified on its own; guessing which one is
 risky in advance is not reliable enough to skip verifying the others.
+
+## 12. Kafka CLI scripts need absolute paths - PATH doesn't include them
+
+Kafka's healthcheck (`kafka-broker-api-versions.sh --bootstrap-server
+localhost:9092`) never passed, and `scripts/smoke_test.sh`'s calls to
+`kafka-topics.sh`/`kafka-console-producer.sh`/`kafka-console-consumer.sh`
+would have failed for the identical reason, unverified until this was
+actually run.
+
+The tell, not a guess: Kafka's own container logs showed a completely
+clean startup - zero errors or warnings, `[BrokerServer id=1] Transition
+from STARTING to STARTED`, `Kafka Server started`, listening on
+`0.0.0.0:9092`, all within about 5 seconds of container start. Docker
+still reported the container unhealthy after exhausting the full retry
+budget (30s start_period + 5x10s retries = ~80s). When an app's own logs
+show total success but its healthcheck still fails every time, suspect
+the healthcheck command before suspecting the app - a broken app usually
+leaves evidence in its own logs, a broken healthcheck command leaves
+none, because the app was never actually asked anything.
+
+Confirmed directly, via a temporary CI job that exec'd into the running
+container (removed once the root cause was found - see git history):
+`which kafka-broker-api-versions.sh` returned exit 1; `echo $PATH` was
+`/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:
+/sbin:/bin` - no `/opt/kafka/bin`; the identical script invoked by
+absolute path succeeded in 2.24s with a full, valid API-versions
+response. That single data point also ruled out the two other candidate
+explanations before spending time on them: not a networking issue (it
+connected and got a real response), not a timing issue (2.24s, nowhere
+near the 5s timeout).
+
+Fixed by using the absolute path `/opt/kafka/bin/kafka-broker-api-
+versions.sh` (and the same prefix for the other three scripts) everywhere
+Kafka's CLI is invoked from outside a shell that's already sourced
+Kafka's own environment. The reference repo's compose file has the
+identical bare-name healthcheck, also never actually run - this bug
+would exist there too, just never discovered.
+
+## 13. Flink 2.0+ requires config.yaml, not flink-conf.yaml, and a writable conf mount
+
+`flink-jobmanager` exited immediately on startup:
+
+```
+Exception in thread "main" org.apache.flink.configuration.IllegalConfigurationException:
+The Flink config file '/opt/flink/conf/config.yaml' (/opt/flink/conf/config.yaml) does not exist.
+```
+
+A config file existed at that mount point - just named `flink-conf.yaml`,
+matching both this project's own prior file and the name used throughout
+`reference/`'s `build.gradle.kts`-adjacent tooling. Per Apache Flink's
+FLIP-366 and the 2.0 release notes: `flink-conf.yaml` (the legacy flat
+`key: value` format) is not read at all starting in Flink 2.0 - not
+deprecated-with-fallback, simply never looked for. `config.yaml`'s
+"standard YAML" format still accepts the same flat dotted keys
+(`execution.checkpointing.interval: 60s`), so no content restructuring
+was needed, only the filename.
+
+The same crash's log carried a second, compounding cause, found together,
+not in a separate debugging pass: `config-parser-utils.sh: line 42: ...
+Read-only file system`. Flink's docker entrypoint needs to *write* into
+the conf directory at container start, to merge the `FLINK_PROPERTIES`
+env var (this project's mechanism for an overridable checkpoint interval,
+see DEFENSE.md #1) into `config.yaml`. The mount was `:ro`. This matches
+a previously-filed, nearly identical upstream issue
+(`GoogleCloudPlatform/flink-on-k8s-operator#213`, "cannot create
+flink-conf.yaml.tmp: Read-only file system") almost verbatim.
+
+Fixed by renaming `config/flink/flink-conf.yaml` -> `config/flink/
+config.yaml` (zero content changes) and dropping `:ro` from both Flink
+services' conf mount in `docker-compose.yml`.
+
+Why this is recorded with both causes together: fixing only the filename
+would have traded one crash for a different one - the read-only write
+failure - on the very next attempt, looking like a second unrelated bug
+instead of the second half of the same one. And: never assume a config
+file's format or name is stable across a major version bump just because
+the material you're adapting from used it - Flink 2.0 is a genuine
+breaking change here, not a deprecation warning reference/ would have
+caught either, since reference/ was never actually run against Flink
+2.1.0 in this form.
