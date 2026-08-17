@@ -11,31 +11,51 @@
 # the TaskManager, exactly-once verification) is deliberately NOT here -
 # destructive, lives in its own script.
 #
-# NEVER RUN AGAINST REAL DOCKER: written to spec, not runtime-verified -
-# no Docker available in the environment this was written in. Expect to
-# need fixes on first real run; every failure message below dumps full
-# output specifically so that fixing is possible without re-deriving
-# what happened.
+# Verified against real Docker via CI, not just written to spec: steps 2
+# and 3 pass as of this writing. Every failure message below still dumps
+# full output, since steps 4/5 (and step 2/3 on a future change) can still
+# break in ways not yet seen.
 #
 # Known unverified risk (step 5): SeaweedFS is started in docker-
 # compose.yml with no -s3.config identity file, so it has no configured
-# access key/secret. The credentials below are placeholders. If step 5
-# fails on auth, that's a real gap this smoke test found, not a bug in
-# the smoke test itself.
+# access key/secret. The placeholder credentials in scripts/sql/
+# smoke_step5.sql may or may not be validated against anything real. If
+# step 5 fails on auth, that's a real gap this smoke test found, not a
+# bug in the smoke test itself.
 
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
+# KAFKA_GROUP/ICEBERG_CATALOG/ICEBERG_DB/ICEBERG_TABLE were removed from
+# here - they only ever fed the step 4/5 SQL heredocs, which are now
+# committed static files in scripts/sql/ instead (see DEFENSE.md #10).
+# Those files hardcode the matching literal values directly.
 TEST_TOPIC="weir-smoke-test"
-KAFKA_GROUP="weir-smoke-consumer"
-ICEBERG_CATALOG="weir_smoke_catalog"
-ICEBERG_DB="smoke_test"
-ICEBERG_TABLE="smoke_iceberg_table"
 
 fail() {
   echo ""
   echo "FAIL: $1"
   exit 1
+}
+
+# The Flink image runs as non-root USER flink (see docker/flink/
+# Dockerfile). A file created by mktemp defaults to mode 600 (owner-only),
+# and `docker compose cp` preserves that mode bit-for-bit into the
+# container - the flink user then can't read it, regardless of who ends
+# up owning it after the copy. See DEFENSE.md #10. Any script-generated
+# file that needs to cross the host->container boundary into this image
+# should be created via this helper, not raw mktemp.
+#
+# Currently unused by steps 2-5 below: step 4/5's SQL turned out to be
+# static, not templated, so it moved to committed files in scripts/sql/,
+# bind-mounted read-only, instead of being generated at runtime at all.
+# Kept for whatever gets added later that does need a runtime-generated
+# file (e.g. step 6's exactly-once verification script).
+make_readable_tmp() {
+  local f
+  f="$(mktemp)"
+  chmod 644 "$f"
+  echo "$f"
 }
 
 # ------------------------------------------------------------
@@ -106,27 +126,10 @@ echo "=== Step 4: Flink reads the Kafka topic, no Iceberg ==="
 echo "(this is where a Kafka-connector/Flink version mismatch is expected"
 echo " to surface - see docker/flink/Dockerfile's known-risk note)"
 
-STEP4_SQL="$(mktemp)"
-cat > "$STEP4_SQL" <<SQL
-CREATE TABLE IF NOT EXISTS smoke_kafka_source (
-  message STRING
-) WITH (
-  'connector' = 'kafka',
-  'topic' = '${TEST_TOPIC}',
-  'properties.bootstrap.servers' = 'kafka:9092',
-  'properties.group.id' = '${KAFKA_GROUP}',
-  'scan.startup.mode' = 'earliest-offset',
-  'format' = 'raw'
-);
-
-SELECT * FROM smoke_kafka_source LIMIT 5;
-SQL
-
-docker compose cp "$STEP4_SQL" flink-jobmanager:/tmp/weir_smoke_step4.sql \
-  || fail "step 4: could not copy SQL script into flink-jobmanager"
-rm -f "$STEP4_SQL"
-
-STEP4_OUTPUT="$(docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /tmp/weir_smoke_step4.sql 2>&1)"
+# SQL is static (see DEFENSE.md #10) - committed at scripts/sql/
+# smoke_step4.sql, bind-mounted read-only at /opt/weir/sql. No temp file,
+# no docker compose cp, no host->container permissions to get wrong.
+STEP4_OUTPUT="$(docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /opt/weir/sql/smoke_step4.sql 2>&1)"
 STEP4_EXIT=$?
 
 if echo "$STEP4_OUTPUT" | grep -qE 'NoClassDefFoundError|NoSuchMethodError|ClassNotFoundException|Could not find any factory'; then
@@ -145,38 +148,9 @@ echo ""
 echo "=== Step 5: write to Iceberg, verify rows landed ==="
 echo "(SeaweedFS has no configured S3 credentials - see script header)"
 
-STEP5_SQL="$(mktemp)"
-cat > "$STEP5_SQL" <<SQL
-SET 'execution.runtime-mode' = 'batch';
-
-CREATE CATALOG IF NOT EXISTS ${ICEBERG_CATALOG} WITH (
-  'type' = 'iceberg',
-  'catalog-type' = 'jdbc',
-  'uri' = 'jdbc:postgresql://postgres:5432/weir_catalog',
-  'jdbc.user' = 'weir',
-  'jdbc.password' = 'weir',
-  'warehouse' = 's3a://weir-warehouse/warehouse',
-  'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO',
-  's3.endpoint' = 'http://seaweedfs:8333',
-  's3.path-style-access' = 'true',
-  's3.access-key-id' = 'admin',
-  's3.secret-access-key' = '***REMOVED***'
-);
-
-USE CATALOG ${ICEBERG_CATALOG};
-CREATE DATABASE IF NOT EXISTS ${ICEBERG_DB};
-USE ${ICEBERG_DB};
-DROP TABLE IF EXISTS ${ICEBERG_TABLE};
-CREATE TABLE ${ICEBERG_TABLE} (message STRING) WITH ('format-version' = '2');
-INSERT INTO ${ICEBERG_TABLE} VALUES ('smoke-row-1'), ('smoke-row-2');
-SELECT COUNT(*) AS row_count FROM ${ICEBERG_TABLE};
-SQL
-
-docker compose cp "$STEP5_SQL" flink-jobmanager:/tmp/weir_smoke_step5.sql \
-  || fail "step 5: could not copy SQL script into flink-jobmanager"
-rm -f "$STEP5_SQL"
-
-STEP5_OUTPUT="$(docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /tmp/weir_smoke_step5.sql 2>&1)"
+# SQL is static (see DEFENSE.md #10) - committed at scripts/sql/
+# smoke_step5.sql, bind-mounted read-only at /opt/weir/sql.
+STEP5_OUTPUT="$(docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /opt/weir/sql/smoke_step5.sql 2>&1)"
 STEP5_EXIT=$?
 
 if echo "$STEP5_OUTPUT" | grep -qE 'AccessDenied|403 Forbidden|Connection refused|ClassNotFoundException|NoClassDefFoundError|SQLException'; then
