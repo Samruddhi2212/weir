@@ -112,3 +112,32 @@ committed files in `scripts/sql/`, bind-mounted read-only at
 `make_readable_tmp()` - stays in the script for whatever does need a
 runtime-generated file later, e.g. step 6's exactly-once verification
 script.
+
+## 11. Predicted dependency risk vs. actual dependency risk
+
+`docker/flink/Dockerfile`'s own comments named a specific "known risk"
+before this was ever run: whether `flink-sql-connector-kafka`'s `-2.0`
+build would load against a 2.1.0 cluster. It did - smoke test step 4
+(Flink reads Kafka, no Iceberg) passes clean in CI. The dependency that
+actually broke was a different one, assumed away entirely rather than
+flagged: Iceberg's `FlinkCatalogFactory.createCatalog()` calls
+`clusterHadoopConf()` unconditionally (confirmed from Iceberg 1.11.0's
+own source - no branch on catalog-type or io-impl), so S3FileIO does not
+avoid needing `org.apache.hadoop.conf.Configuration` on the classpath the
+way "S3FileIO exists partly so Hadoop isn't needed" was assumed to mean.
+Fixed by adding Hadoop 3.x's shaded `hadoop-client-api`/`hadoop-client-
+runtime`, pinned to 3.4.3 - verified against Iceberg 1.11.0's own
+`gradle/libs.versions.toml`, not assumed from Maven Central's newest
+(3.5.0).
+
+Why this is recorded rather than just fixed and moved on: it's evidence
+about *where* dependency risk actually lives in this stack, not just a
+bug. The risk I predicted in advance (Kafka connector versioning) turned
+out fine; the risk that actually broke (a transitively-required Hadoop
+class inside Iceberg's Flink catalog factory) wasn't on my radar at all.
+That's the justification for the layered smoke test (steps 2 through 5
+each verified independently) instead of trusting a clean `docker build` -
+in this stack, a successful build and even a passing earlier layer (step
+4) say nothing about whether the next layer (step 5) works. Each
+dependency boundary has to be verified on its own; guessing which one is
+risky in advance is not reliable enough to skip verifying the others.

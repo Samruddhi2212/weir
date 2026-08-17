@@ -11,21 +11,30 @@
 #
 # Versions re-verified against Maven Central at write time (2026-08-17),
 # not copied blindly from reference - Iceberg moved 1.10.0 -> 1.11.0 in
-# that process. NOT runtime-verified: no Docker available in this
-# environment to actually build and boot this image.
+# that process.
 #
-# Known open risk: flink-sql-connector-kafka is pinned to its "-2.0"
-# build (the newest confirmed to exist on Maven Central at write time).
-# Whether Flink's Kafka connector requires an exact "-2.1" build to load
-# cleanly against a 2.1.0 cluster, or whether "-2.0" is cross-compatible
-# within the 2.x line, could not be confirmed via available search tools.
-# Verify this actually loads before relying on it.
+# flink-sql-connector-kafka's "-2.0" build (vs. an unconfirmed "-2.1")
+# was flagged here as a known risk. It turned out fine - smoke test step
+# 4 (Flink reads Kafka, no Iceberg) passes clean in CI, no classpath
+# errors. The dependency that actually broke was one I'd assumed away
+# entirely: see DEFENSE.md #11.
+#
+# Iceberg's FlinkCatalogFactory.createCatalog() calls clusterHadoopConf()
+# unconditionally (confirmed from Iceberg 1.11.0's own source), regardless
+# of catalog-type or io-impl - S3FileIO does not avoid this. hadoop-
+# client-api/-runtime are Hadoop 3.x's shaded client artifacts, added
+# purely to supply org.apache.hadoop.conf.Configuration without pulling
+# in unshaded hadoop-common's full transitive dependency chain. Pinned to
+# 3.4.3, not Maven Central's newest (3.5.0) - 3.4.3 is what Iceberg
+# 1.11.0 itself is built against (gradle/libs.versions.toml: hadoop3 =
+# "3.4.3"), verified rather than assumed.
 
 FROM flink:2.1.0-java21
 
 ARG ICEBERG_VERSION=1.11.0
 ARG KAFKA_CONNECTOR_VERSION=4.0.1-2.0
 ARG POSTGRES_JDBC_VERSION=42.7.13
+ARG HADOOP_VERSION=3.4.3
 
 USER root
 
@@ -38,6 +47,10 @@ RUN set -eux; \
     curl -fSL -o "flink-sql-connector-kafka-${KAFKA_CONNECTOR_VERSION}.jar" \
       "https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/${KAFKA_CONNECTOR_VERSION}/flink-sql-connector-kafka-${KAFKA_CONNECTOR_VERSION}.jar"; \
     curl -fSL -o "postgresql-${POSTGRES_JDBC_VERSION}.jar" \
-      "https://repo1.maven.org/maven2/org/postgresql/postgresql/${POSTGRES_JDBC_VERSION}/postgresql-${POSTGRES_JDBC_VERSION}.jar"
+      "https://repo1.maven.org/maven2/org/postgresql/postgresql/${POSTGRES_JDBC_VERSION}/postgresql-${POSTGRES_JDBC_VERSION}.jar"; \
+    curl -fSL -o "hadoop-client-api-${HADOOP_VERSION}.jar" \
+      "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-client-api/${HADOOP_VERSION}/hadoop-client-api-${HADOOP_VERSION}.jar"; \
+    curl -fSL -o "hadoop-client-runtime-${HADOOP_VERSION}.jar" \
+      "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-client-runtime/${HADOOP_VERSION}/hadoop-client-runtime-${HADOOP_VERSION}.jar"
 
 USER flink
