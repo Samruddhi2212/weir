@@ -11,17 +11,18 @@
 # the TaskManager, exactly-once verification) is deliberately NOT here -
 # destructive, lives in its own script.
 #
-# Verified against real Docker via CI, not just written to spec: steps 2
-# and 3 pass as of this writing. Every failure message below still dumps
-# full output, since steps 4/5 (and step 2/3 on a future change) can still
-# break in ways not yet seen.
+# Verified against real Docker via CI, not just written to spec: all four
+# steps pass as of this writing (four fixes were needed to get here - see
+# DEFENSE.md #10-13). Every failure message below still dumps full
+# output, since any of this can still break in ways not yet seen on a
+# future change.
 #
-# Known unverified risk (step 5): SeaweedFS is started in docker-
-# compose.yml with no -s3.config identity file, so it has no configured
-# access key/secret. The placeholder credentials in scripts/sql/
-# smoke_step5.sql may or may not be validated against anything real. If
-# step 5 fails on auth, that's a real gap this smoke test found, not a
-# bug in the smoke test itself.
+# SeaweedFS is started in docker-compose.yml with no -s3.config identity
+# file, so it has no credentials of its own configured to check against.
+# Step 5's WEIR_S3_ACCESS_KEY/WEIR_S3_SECRET_KEY (see .env.example) were
+# accepted by SeaweedFS in CI with their local-dev defaults - confirmed,
+# not assumed. That's SeaweedFS's default-permissive behavior when no
+# identity file is configured, not something this smoke test enforces.
 
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -148,9 +149,30 @@ echo ""
 echo "=== Step 5: write to Iceberg, verify rows landed ==="
 echo "(SeaweedFS has no configured S3 credentials - see script header)"
 
-# SQL is static (see DEFENSE.md #10) - committed at scripts/sql/
-# smoke_step5.sql, bind-mounted read-only at /opt/weir/sql.
-STEP5_OUTPUT="$(docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /opt/weir/sql/smoke_step5.sql 2>&1)"
+# scripts/sql/smoke_step5.sql is static and committed (DEFENSE.md #10),
+# containing no credential values at all - only the sentinel tokens
+# __WEIR_S3_ACCESS_KEY__/__WEIR_S3_SECRET_KEY__. It's bind-mounted
+# read-only, so the substituted copy can't be written back to that path;
+# it goes to a make_readable_tmp() file instead (world-readable, so the
+# non-root flink user can read it after docker compose cp - see
+# DEFENSE.md #10/#11) and gets copied in fresh each run.
+WEIR_S3_ACCESS_KEY="${WEIR_S3_ACCESS_KEY:-admin}"
+WEIR_S3_SECRET_KEY="${WEIR_S3_SECRET_KEY:-password123}"
+
+STEP5_SQL_RESOLVED="$(make_readable_tmp)"
+# | as sed delimiter, not /, since s3a:// paths already use / - a
+# credential value containing | would still break this, but these are
+# local-dev defaults, not expected to contain shell/sed metacharacters.
+sed \
+  -e "s|__WEIR_S3_ACCESS_KEY__|${WEIR_S3_ACCESS_KEY}|" \
+  -e "s|__WEIR_S3_SECRET_KEY__|${WEIR_S3_SECRET_KEY}|" \
+  scripts/sql/smoke_step5.sql > "$STEP5_SQL_RESOLVED"
+
+docker compose cp "$STEP5_SQL_RESOLVED" flink-jobmanager:/tmp/weir_smoke_step5_resolved.sql \
+  || fail "step 5: could not copy resolved SQL script into flink-jobmanager"
+rm -f "$STEP5_SQL_RESOLVED"
+
+STEP5_OUTPUT="$(docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /tmp/weir_smoke_step5_resolved.sql 2>&1)"
 STEP5_EXIT=$?
 
 if echo "$STEP5_OUTPUT" | grep -qE 'AccessDenied|403 Forbidden|Connection refused|ClassNotFoundException|NoClassDefFoundError|SQLException'; then

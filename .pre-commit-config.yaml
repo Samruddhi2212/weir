@@ -21,6 +21,20 @@ repos:
         args: ["--fix"]
       - id: ruff-format
 
+  # New dependency, not previously discussed - flagging per CLAUDE.md
+  # rule 6. Chose detect-secrets over gitleaks: it's Python, so it fits
+  # this pre-commit setup's existing toolchain (like ruff above) without
+  # needing a separate Go binary/build. Say so if you want gitleaks
+  # instead. Baseline was generated for real against this repo's actual
+  # content (scripts/sql/smoke_step5.sql's jdbc.password='weir' literal -
+  # the existing local-dev Postgres default, not a real secret), not
+  # written blind.
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+
   - repo: local
     hooks:
       - id: no-gap-markers
