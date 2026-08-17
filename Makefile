@@ -1,4 +1,4 @@
-.PHONY: up down logs seed test
+.PHONY: up down logs seed test smoke
 
 up: ## Start all services (detached), rebuilding the Flink image if changed
 	docker compose up -d --build
@@ -14,3 +14,6 @@ seed: ## Create the S3 warehouse bucket
 
 test: ## Run the test suite
 	pytest -q tests/
+
+smoke: ## Run the smoke test (verification steps 2-5). Requires `make up` first.
+	bash scripts/smoke_test.sh
