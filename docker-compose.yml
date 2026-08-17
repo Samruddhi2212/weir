@@ -2,7 +2,12 @@
 # Weir - Local Infrastructure
 # ============================================================
 # Kafka (KRaft), PostgreSQL, SeaweedFS (S3-compatible), Flink.
-# Every image is pinned to an explicit tag. No :latest.
+# Every pulled image is pinned to tag@digest, not just a tag. No :latest.
+# A tag alone is mutable - the same tag can be repushed with different
+# content later - so tag-only pinning doesn't actually guarantee
+# reproducibility. Digests resolved from Docker Hub's registry API on
+# 2026-08-17 (see DEFENSE.md #15); re-resolve and update if a version is
+# deliberately bumped.
 #
 #   make up      # start all services
 #   make down    # stop all services and remove volumes
@@ -28,7 +33,7 @@ services:
   # Kafka (KRaft mode, combined broker+controller)
   # ------------------------------------------------------------
   kafka:
-    image: apache/kafka:4.1.0
+    image: apache/kafka:4.1.0@sha256:bff074a5d0051dbc0bbbcd25b045bb1fe84833ec0d3c7c965d1797dd289ec88f
     container_name: weir-kafka
     hostname: kafka
     networks:
@@ -64,7 +69,7 @@ services:
   # PostgreSQL (Iceberg catalog metadata store)
   # ------------------------------------------------------------
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     container_name: weir-postgres
     hostname: postgres
     networks:
@@ -93,7 +98,7 @@ services:
   # pull/run even the free tier). SeaweedFS is Apache-2.0 and
   # actively released.
   seaweedfs:
-    image: chrislusf/seaweedfs:4.41
+    image: chrislusf/seaweedfs:4.41@sha256:43b768cd62b00d132439cda881b93fd1adebf1b315e996e794087743821d771d
     container_name: weir-seaweedfs
     hostname: seaweedfs
     networks:

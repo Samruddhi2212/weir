@@ -50,6 +50,18 @@ jobs:
         run: pip install pytest
       - name: Start stack
         run: docker compose up -d --build
+      - name: Capture Flink lib/ jar manifest
+        # Unconditional, not just on failure - so a future pass/fail pair
+        # can be diffed directly instead of speculated about. Motivated
+        # by an unresolved step-5 inconsistency between two otherwise-
+        # identical CI runs (see DEFENSE.md #15) - this makes "was the
+        # actual jar content identical between the two runs" answerable
+        # from evidence next time, not a re-run of the same guesswork.
+        run: |
+          docker compose exec -T flink-jobmanager sh -c '
+            ls -la /opt/flink/lib/
+            sha256sum /opt/flink/lib/*.jar
+          '
       - name: Run tests (unit + integration)
         run: pytest -q tests/
       - name: Show service logs on failure

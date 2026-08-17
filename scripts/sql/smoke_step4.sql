@@ -17,4 +17,9 @@ CREATE TABLE IF NOT EXISTS smoke_kafka_source (
   'format' = 'raw'
 );
 
-SELECT * FROM smoke_kafka_source LIMIT 5;
+-- Sentinel-prefixed, not a bare SELECT *: smoke_test.sh greps for the
+-- exact literal 'WEIR_MSG=' prefix and counts matches. A bare value here
+-- (e.g. just the digit) would risk matching unrelated digits elsewhere in
+-- sql-client's own output (jar version strings like "...-2.1.0.jar"
+-- contain bare digits too) - see DEFENSE.md #14 for why this matters.
+SELECT CONCAT('WEIR_MSG=', message) AS tagged_message FROM smoke_kafka_source LIMIT 5;
