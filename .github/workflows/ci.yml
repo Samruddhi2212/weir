@@ -46,3 +46,20 @@ jobs:
         # C5 says CI runs every test and untested code is not done - this
         # job goes green only once real code and tests land together.
         run: pytest -q tests/
+
+  integration:
+    name: Integration smoke test - steps 2-5 (C5)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start stack
+        run: docker compose up -d --build
+      - name: Run smoke test (steps 2-5)
+        run: bash scripts/smoke_test.sh
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose logs
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
