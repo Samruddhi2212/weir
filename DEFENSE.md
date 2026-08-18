@@ -467,3 +467,41 @@ gating, asserted) and the new, explicitly non-gating `smoke_step4_
 diagnostic_limit.sql` (the original LIMIT approach, 180s timeout,
 reported but not asserted). Whichever way that resolves, the gating
 check no longer depends on the answer.
+
+## 20. The diagnostic answered its question, then became a resource-contention risk
+
+Ran once, got a clean answer, then got removed. The #18 diagnostic ran in
+CI: `smoke_step4.sql` (bounded via `scan.bounded.mode`) passed cleanly;
+`smoke_step4_diagnostic_limit.sql` (the original LIMIT approach) timed
+out at 180s. That settles "slow vs. hung" definitively - it hangs, it
+doesn't just take longer - and closes the question #18 left open about
+whether step 4 ever actually worked before this session's fixes.
+
+The same run's step 5 then failed with the exact `Unknown catalog-type:
+jdbc` error from #14/#15/#16 - and this run used the digest-pinned image
+committed in #15, meaning the mutable-tag hypothesis is now
+disconfirmed as the explanation, not just unproven. Checked the jar
+manifest #15's CI step captures: one copy each of every Iceberg/Hadoop
+jar, correct versions, no duplicates - rules out a classpath conflict as
+well.
+
+What's left, not yet proven but the most concrete lead so far: `timeout
+180` on the host kills the local `docker compose exec` client process.
+It does not cancel the remote Flink job - Flink has no built-in signal
+propagation from a killed CLI client to the job running on the cluster.
+The diagnostic query, confirmed hanging, most likely kept running as an
+orphaned job inside the cluster - consuming a task slot, a Kafka consumer
+group, network buffers - for the rest of that CI run, including through
+step 5's job submission immediately after. This project's own container
+only has `taskmanager.numberOfTaskSlots: 4` configured; a leaked slot is
+not nothing.
+
+Removed the diagnostic (`scripts/sql/smoke_step4_diagnostic_limit.sql`
+and its call site in `smoke_test.sh`) rather than keep it around: its
+question is answered, and every future run would otherwise re-carry the
+same resource-leak risk for no further information gained. Left
+unresolved and stated as such: this is the most concrete lead for the
+step-5 inconsistency so far, not a confirmed root cause. Proving it would
+need a run of steps 2-5 with the diagnostic fully absent (as it now is
+going forward) to see whether step 5 becomes consistently reliable, or
+whether something else is still in play.
