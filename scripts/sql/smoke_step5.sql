@@ -10,22 +10,40 @@
 -- vars, see .env.example) into a temp copy before this file ever reaches
 -- the container - this static file, as committed, never contains a real
 -- or even placeholder-literal credential value. SeaweedFS in docker-
--- compose.yml has no -s3.config identity file, so it has no configured
--- access key/secret of its own to match against - if this fails on auth,
--- that's a real finding, not a bug in this file.
+-- compose.yml has no -s3.config identity file baked in; smoke_test.sh's
+-- setup step configures the matching identity live, via `weed shell`,
+-- before this file ever runs (see DEFENSE.md #24) - if this fails on
+-- auth, that's a real finding, not a bug in this file.
+--
+-- catalog-type is 'rest', not 'jdbc': Iceberg's FlinkCatalogFactory never
+-- supports 'jdbc' at all - confirmed from its own source, and confirmed
+-- the hard way, 5/5 reproducible CI failures against the identical
+-- config (see DEFENSE.md #21). The catalog server itself still stores
+-- its metadata in Postgres via JDBC (see the iceberg-rest service's own
+-- CATALOG_URI in docker-compose.yml) - that part didn't change. What
+-- changed is that Flink now talks to it over the REST protocol instead
+-- of trying to open a JDBC catalog connection directly, which was never
+-- a supported combination for Flink specifically.
 
 SET 'execution.runtime-mode' = 'batch';
 -- Required, not optional, for the final SELECT below when run via
 -- `sql-client.sh -f` (non-interactive) - see smoke_step4.sql's comment
 -- and DEFENSE.md #16.
 SET 'sql-client.execution.result-mode' = 'TABLEAU';
+-- By default SQL Client submits INSERT as a detached job and moves on
+-- immediately - "successfully submitted to the cluster" means submitted,
+-- not finished. Without this, the SELECT below can (and did, in CI) run
+-- before the INSERT's job has actually committed any rows, reading 0
+-- back deterministically rather than 2 - not a flaky race, a guaranteed
+-- one, since -f runs every statement back-to-back with no delay at all.
+-- Confirmed against Flink's own SQL Client docs (table.dml-sync). See
+-- DEFENSE.md #24.
+SET 'table.dml-sync' = 'true';
 
 CREATE CATALOG IF NOT EXISTS weir_smoke_catalog WITH (
   'type' = 'iceberg',
-  'catalog-type' = 'jdbc',
-  'uri' = 'jdbc:postgresql://postgres:5432/weir_catalog',
-  'jdbc.user' = 'weir',
-  'jdbc.password' = 'weir',
+  'catalog-type' = 'rest',
+  'uri' = 'http://iceberg-rest:8181',
   'warehouse' = 's3a://weir-warehouse/warehouse',
   'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO',
   's3.endpoint' = 'http://seaweedfs:8333',
