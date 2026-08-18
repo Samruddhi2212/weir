@@ -225,18 +225,34 @@ echo "PASS: stage 4 - producer running (pid $PRODUCER_PID)"
 # ------------------------------------------------------------
 # Stage 5: wait for >=3 completed checkpoints (baseline, pre-kill)
 # ------------------------------------------------------------
+# WAIT_RESULT is a global, not this function's stdout - a function
+# that both `echo`s a return value AND wants to print diagnostics with
+# print_raw cannot be called via "$(...)" without silently capturing
+# BOTH into the caller's variable, print_raw's output included. That
+# bug shipped in this script's first real run: the "final checkpoints
+# JSON" diagnostic never appeared anywhere in the log, swallowed into
+# $BASELINE_CHECKPOINTS instead of printed, leaving the actual timeout
+# unexplained. Fixed by using a global for the value and leaving stdout
+# entirely to print_raw/echo for real output, matching this script's own
+# stated rule that every raw output has to actually be visible.
+WAIT_RESULT=""
 wait_for_checkpoints() {
-  local min_count="$1" budget="$2" waited=0 cp_json completed
+  local min_count="$1" budget="$2" waited=0 cp_json completed job_json state
+  WAIT_RESULT=""
   while true; do
     cp_json="$(curl -s --max-time 10 "http://localhost:${FLINK_UI_PORT}/jobs/${JOB_ID}/checkpoints")"
     completed="$(extract_json "$cp_json" "d['counts']['completed']")" || completed=""
+    job_json="$(curl -s --max-time 10 "http://localhost:${FLINK_UI_PORT}/jobs/${JOB_ID}")"
+    state="$(extract_json "$job_json" "d['state']")" || state="<unparseable>"
+    echo "  ...waited ${waited}s: job state=$state, completed checkpoints=${completed:-<unparseable>} (target >=$min_count)"
     if [ -n "$completed" ] && [ "$completed" -ge "$min_count" ] 2>/dev/null; then
-      echo "$completed"
+      WAIT_RESULT="$completed"
       return 0
     fi
     waited=$((waited + 5))
     if [ "$waited" -ge "$budget" ]; then
       print_raw "final checkpoints JSON" "$cp_json"
+      print_raw "final job status JSON" "$job_json"
       return 1
     fi
     sleep 5
@@ -245,10 +261,11 @@ wait_for_checkpoints() {
 
 echo ""
 echo "=== Stage 5: wait for >=3 completed checkpoints (baseline) ==="
-BASELINE_CHECKPOINTS="$(wait_for_checkpoints 3 180)"
-if [ $? -ne 0 ] || [ -z "$BASELINE_CHECKPOINTS" ]; then
+wait_for_checkpoints 3 180
+if [ $? -ne 0 ]; then
   dump_logs_and_fail "stage 5: did not reach 3 completed checkpoints within 180s"
 fi
+BASELINE_CHECKPOINTS="$WAIT_RESULT"
 echo "PASS: stage 5 - $BASELINE_CHECKPOINTS completed checkpoints observed (baseline)"
 
 # ------------------------------------------------------------
@@ -324,10 +341,11 @@ echo "PASS: stage 8 - job state is RUNNING again (took ~${JOB_WAITED}s)"
 echo ""
 echo "=== Stage 9: wait for >=3 completed checkpoints after recovery ==="
 POST_TARGET=$((BASELINE_CHECKPOINTS + 3))
-POST_CHECKPOINTS="$(wait_for_checkpoints "$POST_TARGET" 180)"
-if [ $? -ne 0 ] || [ -z "$POST_CHECKPOINTS" ]; then
+wait_for_checkpoints "$POST_TARGET" 180
+if [ $? -ne 0 ]; then
   dump_logs_and_fail "stage 9: did not reach $POST_TARGET completed checkpoints within 180s of recovery"
 fi
+POST_CHECKPOINTS="$WAIT_RESULT"
 echo "PASS: stage 9 - $POST_CHECKPOINTS completed checkpoints observed (target was >=$POST_TARGET)"
 
 # ------------------------------------------------------------
