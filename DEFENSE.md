@@ -851,3 +851,217 @@ commit was re-run five times via `gh run rerun` rather than trusted on
 the first green result. All five: pass, `WEIR_ROW_COUNT=2`, no
 `S3Exception`, no `table.dml-sync` timeout. Step 5 - and steps 2 through
 5 as a whole - is genuinely green, not a lucky single run.
+
+## 25. Step 6's producer: a real delivery-confirmed client, not the console-producer CLI
+
+`scripts/produce_events.py`'s emission log has to be ground truth for
+`scripts/verify_exactly_once.py` - every later count (landed, duplicates,
+gaps) is only as trustworthy as "the events in this log were genuinely
+sent." That requirement, not just convenience, is what the tool choice
+turns on.
+
+**Alternative rejected:** reuse `kafka-console-producer.sh` (the tool
+smoke test step 3 already uses, zero new dependencies) in a loop,
+logging each key/timestamp to the emission log immediately before or
+after feeding it a line. Rejected because "logged" and "confirmed
+delivered" would be two different things with this tool: console-
+producer batches internally and has no way to expose a per-message
+delivery callback back to the shell loop driving it. A log entry would
+mean "we asked Kafka to send this," not "Kafka's leader acked this" -
+weaker than what an exactly-once verification should be built on.
+
+**Chosen, after asking rather than deciding unilaterally (CLAUDE.md hard
+rule 6):** `kafka-python` (pinned `3.0.11`, Apache-2.0, confirmed via
+PyPI's own package metadata - a pure-Python client, no C extension to
+complicate the CI environment). Every send registers a delivery callback
+via `.add_callback(...)`/`.add_errback(...)`; the emission log is written
+*only* from the success callback, after the broker has acked the write,
+never speculatively before sending. A failed delivery is written to
+stderr and recorded as a hard failure, not silently dropped - if the
+producer can't confirm a send, that has to be visible, not smoothed over
+by "the log just doesn't mention it."
+
+Tradeoff accepted: one new Python dependency, for one script, that
+nothing else in this project needs. Scoped narrowly on purpose - it's a
+dependency of the *validation tooling*, not of any job or service this
+project ships, matching the same category as `pytest` already is.
+
+## 26. Detecting orphaned files: SeaweedFS's own tools can't do it; Iceberg's `$all_data_files` plus the Filer's JSON API can
+
+DEFENSE.md #19 defined what an orphaned file is: physically present under
+the table's warehouse path, but not reachable from *any* snapshot's
+manifest tree, past or present. Two lists have to be built and diffed:
+every file Iceberg has ever referenced, and every file actually sitting
+in the object store.
+
+**The referenced side.** Checked Iceberg's own Flink SQL metadata-table
+docs before assuming `$files` (the one already known from casual
+familiarity) was enough: `$files` only covers the *current* snapshot.
+`$all_data_files` is the one documented to span every snapshot the table
+has ever had, expired or not - confirmed against Iceberg's own Flink
+querying docs, not assumed from the Spark-side naming convention.
+`SELECT file_path FROM eos_events$all_data_files` is what
+`verify_exactly_once.py` actually runs, via the same `sql-client.sh -f`
+mechanism every other SQL step in this project already uses.
+
+**The on-disk side - two tools considered, one rejected on inspection.**
+`weed shell`'s `fs.tree` is documented as "recursively list all files
+under a directory" - looked like the obvious fit. Checked its actual
+source (`command_fs_tree.go`) before relying on it: it prints a box-
+drawing tree (`├──`, `└──`, Unicode line characters), built specifically
+for human eyes, with no flag to emit flat paths instead. Reconstructing
+full paths from indentation and tree-drawing characters is exactly the
+kind of "parse loosely-structured output and hope" this project has
+already been burned by once this session (`grep -qE '\b2\b'`, DEFENSE.md
+#14) - rejected before writing a single line depending on it.
+
+**Chosen:** SeaweedFS's Filer HTTP API, which returns real JSON on
+request (`Accept: application/json`) for any directory: `{"Path": ...,
+"Entries": [{"FullPath": ..., "Mode": ..., "chunks": [...]}, ...]}` -
+confirmed against the Filer Server API wiki page directly, not
+recalled. `verify_exactly_once.py` walks this recursively from the
+warehouse root using Python's stdlib `urllib` and `json` (no new
+dependency - unlike #25, this one didn't need one), treating an entry as
+a file if its `chunks` key is present (even as an empty list) and a
+directory otherwise, per the wiki's own description ("files include a
+chunks array; directories do not"). Handles the API's own pagination
+(`Limit`/`LastFileName`/`ShouldDisplayLoadMore`) rather than assuming a
+single page always covers a table this small - a smoke-scale run
+probably never hits the 100-entry default limit, but "probably won't
+matter" is exactly the standard this project has been holding itself to
+not accepting all session.
+
+**Stated honestly, not swept under the same confidence as the rest of
+this entry:** the file-vs-directory heuristic (chunks key present vs.
+absent) is inferred from the wiki's prose, not exhaustively verified
+against SeaweedFS's own source the way #22's healthcheck fix or #25's
+delivery-callback behavior were. If orphan-file counts ever look wrong in
+a way nothing else explains, this heuristic - not a re-guess at something
+else - is the first thing to re-check.
+
+## 27. Killing the TaskManager for real, and bringing it back without changing docker-compose.yml's failure-handling behavior for everything else
+
+`flink-taskmanager` in `docker-compose.yml` has no `restart:` policy - the
+Compose default, `no`. A real container crash (OOM, node failure, a bad
+deploy) would just leave it dead until something else notices and acts;
+nothing in this stack currently auto-heals that. That's the honest
+starting condition this test runs against, not a gap introduced for the
+test's convenience.
+
+**Alternative rejected:** add `restart: on-failure` (or
+`unless-stopped`) to `flink-taskmanager` in `docker-compose.yml`, so a
+killed container comes back on its own during the test. Rejected because
+that's a real, permanent change to this project's general failure-
+handling posture - affecting every future run, every other kind of
+TaskManager failure, not just this one destructive test - decided as a
+side effect of writing a test script, not as its own considered choice.
+If always-restart TaskManagers is the right call for this project, that
+deserves its own DEFENSE.md entry made on its own merits, not smuggled in
+here.
+
+**Chosen:** `scripts/verify_recovery.sh` does both halves explicitly and
+visibly. `docker compose kill -s SIGKILL flink-taskmanager` for the
+failure itself - SIGKILL, not `stop` (SIGTERM, graceful) or `restart`,
+because a real crash doesn't wait for the process to clean up, and this
+test is specifically about what happens when it doesn't. Then `docker
+compose start flink-taskmanager` to bring the container back - standing
+in for whatever infra-level mechanism (a orchestrator restarting a pod, a
+supervisor process, a human) would do that in a real deployment, which is
+explicitly out of scope for what this test is verifying. What's being
+tested here is what Flink itself does once task slots exist again, not
+whether the surrounding infrastructure heals itself - `docker-compose.yml`
+stays exactly as failure-tolerant (or not) as it already was for every
+other purpose.
+
+**Stopping the job at the end:** `bin/flink stop <jobID>`, not `cancel` -
+a graceful stop triggers a final savepoint before terminating, `cancel`
+does not. `config/flink/config.yaml` already sets `state.savepoints.dir:
+file:///tmp/flink-savepoints`, and that volume is already mounted in
+`docker-compose.yml` for both Flink services - `stop` works with no
+extra flag or new infrastructure, entirely because that groundwork
+already existed for an unrelated reason.
+
+## 28. Overriding checkpoint interval for real: min-pause has to move too, or "10s" is a lie
+
+The task asks for checkpoint interval overridden to 10s "via the env
+var, not hardcoded" for this one validation job, without touching the
+cluster-wide 60s default (DEFENSE.md #1) other jobs still run under.
+
+**Session-scoped, not cluster-scoped, confirmed before relying on it:**
+checked whether Flink SQL Client's `SET` actually applies arbitrary
+`execution.checkpointing.*` keys to a job submitted from that session, or
+only a curated subset - confirmed real usage of `SET
+'execution.checkpointing.interval' = '5 s';` in this exact form, not
+assumed from the `FLINK_PROPERTIES` mechanism already used elsewhere in
+this project (that one works at the container/cluster level, a different
+mechanism entirely). `scripts/sql/exactly_once_job.sql` sets it via a
+sentinel token (`__WEIR_EOS_CHECKPOINT_INTERVAL__`), substituted from a
+new `WEIR_EOS_CHECKPOINT_INTERVAL` env var (default `10s`) the same way
+`smoke_step5.sql` already substitutes credentials - never hardcoded in
+the committed file.
+
+**The part that would have quietly broken this:** `config/flink/
+config.yaml` also sets `execution.checkpointing.min-pause: 30s`
+cluster-wide - the minimum gap enforced between the *end* of one
+checkpoint and the *start* of the next, independent of the interval
+setting. Left alone, a 10s interval with a 30s min-pause doesn't produce
+checkpoints every 10s; min-pause dominates whenever it's the larger of
+the two, so the job would actually checkpoint no more often than every
+~30s+ while still claiming a "10s" interval - not wrong, just silently
+not doing what it says, exactly the class of mismatch DEFENSE.md #16
+already found once (a setting nobody stated explicitly, quietly
+determining behavior instead of the one everybody was looking at).
+`exactly_once_job.sql` also sets `SET 'execution.checkpointing.min-pause'
+= '0s';` for this session, so the 10s interval is the actual cadence, not
+a number that only appears in a config key nothing enforces.
+
+**Scope limitation, stated rather than silently assumed:** the topic
+(`weir-eos-events`) is created with a single partition, matching smoke
+test step 3's own convention. This keeps gap/duplicate accounting exact
+(no cross-partition interleaving to reason about) but means this run
+doesn't exercise `IcebergStreamWriter`'s parallel-subtask-commit path
+described in DEFENSE.md #19 under real multi-partition concurrency -
+only its single-partition case. If that path specifically needs
+validating later, it needs its own run with a multi-partition topic, not
+an assumption that this one already covered it.
+
+## 29. TABLEAU mode's 30-character column truncation would have silently corrupted the orphan-file comparison
+
+Almost shipped `scripts/sql/exactly_once_verify.sql`'s file-path dump
+using the exact same sentinel-grep pattern as `smoke_step5.sql`
+(`WEIR_FILE=<path>`), the same way `WEIR_ROW=` already works for
+event rows. Checked one assumption before trusting it for `file_path`
+specifically, since S3 URIs are long and event keys aren't: does
+`sql-client.sh`'s TABLEAU result mode ever truncate a column's printed
+value? Confirmed, not hypothetical: Flink's own SQL Client
+documentation states long string values are truncated to 30 characters
+by default. `s3a://weir-warehouse/warehouse/eos_test/eos_events/data/...`
+is comfortably past that. A silently truncated path would never match
+anything in the Filer's actual on-disk listing - every real data file
+would have registered as a false orphan, and the count would have looked
+like a specific, plausible finding instead of what it actually would
+have been: a display setting nobody looked at.
+
+**Alternative drafted, then abandoned as disproportionate:** route both
+the row-dump and the file-list-dump through a Flink filesystem-connector
+sink (`INSERT INTO ... WITH ('connector'='filesystem', ...)`), writing
+CSV directly to a bind-mounted host directory, bypassing terminal
+rendering entirely. Would have worked, but it's a new docker-compose.yml
+volume mount, a new host-directory-permissions question (the same
+non-root `USER flink` problem DEFENSE.md #10 already solved once, just
+in the write direction this time), and an unverified assumption about
+exactly how Flink's filesystem connector lays out batch INSERT output
+(one file at the given path, or a directory of part-files - not checked,
+because it turned out not to be necessary).
+
+**Chosen, once the simpler fix was confirmed real:** raise the limit via
+`SET`. `sql-client.display.max-column-width` is the name most search
+results surface, but it's deprecated as of FLIP-279/FLINK-30025 (fixed
+in Flink 1.18.0, well before this project's pinned 2.1.0) in favor of
+`table.display.max-column-width` - used the current key, not the
+deprecated one, confirmed against the JIRA ticket's own fix-version
+field rather than the first name found. Set to `500` in
+`exactly_once_verify.sql`, comfortably past any path this warehouse
+layout produces. One `SET` statement, zero new infrastructure, and the
+sentinel-grep pattern already proven in `smoke_step5.sql` stays exactly
+as it was.
