@@ -1,4 +1,4 @@
-.PHONY: up down logs seed test smoke
+.PHONY: up down logs seed test smoke verify-recovery verify-eos
 
 up: ## Start all services (detached), rebuilding the Flink image if changed
 	docker compose up -d --build
@@ -22,3 +22,9 @@ test: ## Run the test suite
 
 smoke: ## Run the smoke test (verification steps 2-5). Requires `make up` first.
 	bash scripts/smoke_test.sh
+
+verify-recovery: ## Step 6: destructive TaskManager-kill exactly-once test. Requires `make up` and `make seed` first. Kills a running container - see DEFENSE.md #27.
+	bash scripts/verify_recovery.sh
+
+verify-eos: ## Step 6: compare Iceberg's contents against verify-recovery's emission log. Run after verify-recovery.
+	python3 scripts/verify_exactly_once.py --emission-log artifacts/eos_emission_log.jsonl --report-json artifacts/eos_report.json
