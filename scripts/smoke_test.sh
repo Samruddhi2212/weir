@@ -164,25 +164,14 @@ STEP4_MATCHED="$(echo "$STEP4_OUTPUT" | grep -oE 'WEIR_MSG=[0-9]+' | wc -l | tr 
 $STEP4_OUTPUT"
 echo "PASS: step 4 - Flink read from Kafka, no classpath errors"
 
-# --------------------------------------------------------------
-# Step 4 diagnostic (non-gating): does the original LIMIT-based
-# approach merely take longer under TABLEAU mode, or hang regardless
-# of timeout length? Reported, not asserted - see DEFENSE.md #18.
-# --------------------------------------------------------------
-echo ""
-echo "=== Step 4 diagnostic: LIMIT-based read, longer timeout, non-gating ==="
-DIAG_OUTPUT="$(timeout 180 docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /opt/weir/sql/smoke_step4_diagnostic_limit.sql 2>&1)"
-DIAG_EXIT=$?
-DIAG_MATCHED="$(echo "$DIAG_OUTPUT" | grep -oE 'WEIR_MSG=[0-9]+' | wc -l | tr -d '[:space:]')"
-
-if [ "$DIAG_EXIT" -eq 124 ]; then
-  echo "DIAGNOSTIC: LIMIT-based read timed out after 180s (still hanging, not just slow)."
-elif [ "$DIAG_EXIT" -eq 0 ] && [ "$DIAG_MATCHED" = "5" ]; then
-  echo "DIAGNOSTIC: LIMIT-based read succeeded (5 tagged messages) - was slow, not hung."
-else
-  echo "DIAGNOSTIC: LIMIT-based read neither timed out nor succeeded cleanly (exit=$DIAG_EXIT, matched=$DIAG_MATCHED). Full output:"
-  echo "$DIAG_OUTPUT"
-fi
+# The step 4 diagnostic (LIMIT-based read, longer timeout) that lived
+# here has been removed. It answered its question - the LIMIT approach
+# genuinely hangs, confirmed at 180s, not just slow - and removing it
+# turned out to matter for a second reason: `timeout` only kills the
+# local `docker compose exec` client, not the remote Flink job, so the
+# hung diagnostic query likely kept running in the cluster as a zombie
+# job after being "killed" locally, right before step 5 submitted its
+# own job. See DEFENSE.md #20.
 
 # ------------------------------------------------------------
 # Step 5: write to Iceberg via the single catalog config
