@@ -130,8 +130,20 @@ echo " to surface - see docker/flink/Dockerfile's known-risk note)"
 # SQL is static (see DEFENSE.md #10) - committed at scripts/sql/
 # smoke_step4.sql, bind-mounted read-only at /opt/weir/sql. No temp file,
 # no docker compose cp, no host->container permissions to get wrong.
-STEP4_OUTPUT="$(docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /opt/weir/sql/smoke_step4.sql 2>&1)"
+#
+# Wrapped in `timeout` - a real CI run hung here (or in step 5) for the
+# full 20-minute job cap with zero output, cancelled by GitHub Actions
+# rather than failing with a message (see DEFENSE.md #17). Without an
+# external bound, an unresponsive sql-client has no way to report
+# anything at all; this trades "silent 20-minute cancellation" for a
+# fast, clear failure message.
+STEP4_OUTPUT="$(timeout 90 docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /opt/weir/sql/smoke_step4.sql 2>&1)"
 STEP4_EXIT=$?
+
+if [ "$STEP4_EXIT" -eq 124 ]; then
+  fail "step 4: sql-client timed out after 90s (no output captured before
+the timeout - see DEFENSE.md #17)."
+fi
 
 if echo "$STEP4_OUTPUT" | grep -qE 'NoClassDefFoundError|NoSuchMethodError|ClassNotFoundException|Could not find any factory'; then
   fail "step 4: Kafka connector / Flink classpath error. Full output:
@@ -182,8 +194,13 @@ docker compose cp "$STEP5_SQL_RESOLVED" flink-jobmanager:/tmp/weir_smoke_step5_r
   || fail "step 5: could not copy resolved SQL script into flink-jobmanager"
 rm -f "$STEP5_SQL_RESOLVED"
 
-STEP5_OUTPUT="$(docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /tmp/weir_smoke_step5_resolved.sql 2>&1)"
+STEP5_OUTPUT="$(timeout 90 docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /tmp/weir_smoke_step5_resolved.sql 2>&1)"
 STEP5_EXIT=$?
+
+if [ "$STEP5_EXIT" -eq 124 ]; then
+  fail "step 5: sql-client timed out after 90s (no output captured before
+the timeout - see DEFENSE.md #17)."
+fi
 
 # This list is a diagnostic aid, not the actual safety net - the
 # exit-code check below is what genuinely catches failures (confirmed:

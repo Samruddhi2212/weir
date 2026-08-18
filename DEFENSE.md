@@ -384,3 +384,44 @@ exception, at catalog-creation time, before any SELECT executes), but it
 reinforces the same posture #15 already argued for: state every
 execution-mode assumption explicitly in the SQL itself, rather than
 relying on whatever Flink's client happens to default to.
+
+## 17. Unbounded sql-client invocations turned a hang into a 20-minute silent cancellation
+
+The first attempt at the 5-trial re-verification (after #16's fix)
+produced neither a pass nor a clear fail: the CI job ran for 20 minutes -
+its full `timeout-minutes` cap - printed zero output from `pytest -q
+tests/` the entire time, and was cancelled by GitHub Actions rather than
+failing on its own.
+
+Why zero output: `subprocess.run(..., capture_output=True)` in
+`tests/integration/test_smoke.py` only surfaces the child process's
+stdout/stderr once it *returns* - pytest has nothing to print while the
+subprocess is still blocked, pass or fail. A hung subprocess is
+indistinguishable from a slow one until something external kills it.
+Neither `docker compose exec ... sql-client.sh -f ...` invocation in
+`scripts/smoke_test.sh` (step 4 or step 5) had any bound of its own -
+each was a bare command substitution, willing to wait forever. Steps 2
+and 3 already had bounds (step 2's 180s polling loop, step 3's Kafka
+consumer's own `--timeout-ms 15000`); steps 4 and 5 didn't, and this is
+where it hung.
+
+Fixed by wrapping both invocations in `timeout 90` and checking for exit
+code 124 (timeout's own signal that it killed the child) with a specific
+failure message. This does not identify *which* of the two hung, or
+*why* - `timeout` kills the local `docker compose exec` client process,
+which stops the script from waiting further, but doesn't necessarily
+prove what the remote process inside the container was doing when it was
+killed.
+
+Why this is worth its own entry: a hang and a failure are not the same
+failure mode, and treating them the same (by not bounding anything) means
+the *slowest* possible feedback - here, 20 minutes of silence, then a
+generic "cancelled" with no diagnostic content at all - instead of the
+fastest. Every external call in a verification script needs an answer to
+"what happens if this simply never returns," not just "what happens if it
+returns an error." This was the second time in two attempts that trying
+to actually run the 5-trial verification surfaced a real bug in the
+verification tooling itself rather than in the thing being verified
+(see #16) - which is its own argument for actually running verification
+scripts repeatedly, under real conditions, rather than trusting them once
+they're merely written.
