@@ -700,15 +700,28 @@ end up with the bucket present. `Makefile`'s `seed` target got the
 identical two-line update, kept as a still-useful standalone target for
 manual workflows that don't go through `smoke_test.sh` at all.
 
-**Not yet confirmed, stated honestly:** whether `s3.configure -apply`
-takes effect on an already-running `weed server -s3` process without a
-restart. SeaweedFS's own wiki confirms the `-s3.config` file's
-auto-reload behavior (SIGHUP-driven) but doesn't document this for the
-shell-driven path specifically; the command's own description ("update
-and apply s3 configuration") reads as live-effect, and the identity store
-`s3.configure` writes to is managed by the master/filer the running `-s3`
-process is already talking to, not a separate per-process file - but this
-is inference from the source and wiki, not yet proven by a passing CI
-run. If step 5 still fails on the same `S3Exception` after this change,
-that inference is the first thing to revisit, not a re-guess at something
-else.
+**Confirmed, not just inferred, by the actual CI run that followed this
+change:** `s3.configure -apply` does take effect on an already-running
+`weed server -s3` process with no restart involved - the setup step's
+own stdout showed the created identity object (echoed back as JSON) and
+`created bucket weir-warehouse`, and every subsequent SQL statement
+(`CREATE CATALOG`, `CREATE TABLE`, `INSERT`) succeeded with zero
+`S3Exception` of any kind. The signed-request-authentication problem
+this entry set out to fix is resolved.
+
+**A second, distinct bug surfaced in the same run, after the fix above
+was already working:** the row-count check still failed - not on an
+auth error this time, but `WEIR_ROW_COUNT=0` instead of `2`. The INSERT
+statement's own output read `[INFO] SQL update statement has been
+successfully submitted to the cluster: Job ID: ...` - submitted, not
+completed. Checked against Flink's own SQL Client docs before treating
+this as flaky: by default, SQL Client submits DML as a detached job and
+immediately moves on to the next statement; it does not wait for the
+job to finish. Running via `-f` with no interactive pause means the
+`SELECT COUNT(*)` on the very next line was guaranteed to race the
+INSERT's job, not occasionally risk it - this would have failed 100% of
+the time, every run, not just this one. Fixed with `SET 'table.dml-sync'
+= 'true';`, documented for exactly this: it makes SQL Client block until
+a submitted DML statement's job actually completes before returning
+control for the next statement. Added to `smoke_step5.sql` only -
+`smoke_step4.sql` has no DML statement to race against, only a SELECT.
