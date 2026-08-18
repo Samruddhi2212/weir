@@ -1,0 +1,48 @@
+name: Exactly-Once Validation (destructive)
+
+# Manual trigger only - never on push/PR. scripts/verify_recovery.sh
+# SIGKILLs a running container; it has no place in the normal per-push
+# gate ci.yml runs. Per the standing instruction after DEFENSE.md #20/#21
+# (a single green run meant nothing that time), this is meant to be
+# dispatched repeatedly, not trusted on one pass.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  verify:
+    name: Kafka -> Flink -> Iceberg exactly-once + TaskManager recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install kafka-python
+        # Pinned - see DEFENSE.md #25 for why this dependency exists at
+        # all (a real per-message delivery callback, which the
+        # console-producer CLI can't provide) and PyPI's own metadata
+        # for the version/license (Apache-2.0).
+        run: pip install kafka-python==3.0.11
+      - name: Start stack
+        run: docker compose up -d --build
+      - name: Configure SeaweedFS identity + warehouse bucket
+        run: make seed
+      - name: Run destructive recovery test (producer, Flink job, TaskManager kill/recovery)
+        run: bash scripts/verify_recovery.sh
+      - name: Run exactly-once verification
+        if: always()
+        run: python3 scripts/verify_exactly_once.py --emission-log artifacts/eos_emission_log.jsonl --report-json artifacts/eos_report.json
+      - name: Upload run artifacts (emission log, producer log, report)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exactly-once-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: warn
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose logs
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
