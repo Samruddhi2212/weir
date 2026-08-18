@@ -1065,3 +1065,54 @@ field rather than the first name found. Set to `500` in
 layout produces. One `SET` statement, zero new infrastructure, and the
 sentinel-grep pattern already proven in `smoke_step5.sql` stays exactly
 as it was.
+
+## 30. A latent infrastructure bug in the base image, only reachable once a job actually checkpoints
+
+First real run of `scripts/verify_recovery.sh` failed before the job
+even started - not in any step-6-specific code, in job submission
+itself:
+
+```
+Caused by: java.io.IOException: Failed to create directory for shared state: file:/tmp/flink-checkpoints/<job-id>/shared
+	at org.apache.flink.runtime.state.filesystem.FsCheckpointStorageAccess.initializeBaseLocationsForCheckpoint(...)
+	at org.apache.flink.runtime.checkpoint.CheckpointCoordinator.<init>(...)
+```
+
+Root cause, once traced back: `docker/flink/Dockerfile` never creates
+`/tmp/flink-checkpoints` or `/tmp/flink-savepoints` - those paths have
+only ever existed via `docker-compose.yml`'s named volumes
+(`flink-checkpoints:`/`flink-savepoints:`), mounted over a path the
+image itself has nothing at. A fresh named volume with no matching
+content already in the image gets created at first mount owned by
+root, not by the non-root `flink` user (uid 9999, confirmed from
+`apache/flink-docker`'s own Dockerfile) this image runs as. Same root
+cause as DEFENSE.md #10 - a non-root user meeting something it can't
+write to - but on a directory Docker itself creates at mount time,
+not a file this project copies in.
+
+**Why this was never caught before, honestly:** every SQL run in this
+project until now (`smoke_step4.sql`, `smoke_step5.sql`) was bounded/
+batch. Batch execution in Flink doesn't enable checkpointing the same
+way a continuous streaming job does - `execution.checkpointing.interval:
+60s` sits in `config/flink/config.yaml` and applies cluster-wide
+regardless, but nothing before `exactly_once_job.sql` (streaming,
+by construction - it reads an unbounded Kafka source) had ever actually
+asked the JobManager to construct checkpoint storage. The permission
+problem was latent in this project's infrastructure since `docker-
+compose.yml` first added those volumes, reachable by any streaming job,
+just never triggered because none had been submitted yet.
+
+**Fixed** in `docker/flink/Dockerfile`, before `USER flink`: `mkdir -p
+/tmp/flink-checkpoints /tmp/flink-savepoints && chown -R flink:flink
+...`. Docker's documented behavior for named volumes - content (and
+ownership) already present in the image at a mount point gets copied
+into a freshly created volume on first mount - means this is enough;
+no entrypoint wrapper, no runtime chown, no change to `docker-
+compose.yml` at all.
+
+**Scope note:** this is a base-infrastructure fix, not a step-6-only
+one - it belongs on `main`, not just `exactly-once-validation`, since
+any future streaming job (not only this validation) would have hit the
+identical failure the first time it tried to checkpoint. Ported to
+`main` in its own commit rather than folded silently into a step-6
+commit on this branch.
