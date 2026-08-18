@@ -13,6 +13,16 @@
 -- compose.yml has no -s3.config identity file, so it has no configured
 -- access key/secret of its own to match against - if this fails on auth,
 -- that's a real finding, not a bug in this file.
+--
+-- catalog-type is 'rest', not 'jdbc': Iceberg's FlinkCatalogFactory never
+-- supports 'jdbc' at all - confirmed from its own source, and confirmed
+-- the hard way, 5/5 reproducible CI failures against the identical
+-- config (see DEFENSE.md #21). The catalog server itself still stores
+-- its metadata in Postgres via JDBC (see the iceberg-rest service's own
+-- CATALOG_URI in docker-compose.yml) - that part didn't change. What
+-- changed is that Flink now talks to it over the REST protocol instead
+-- of trying to open a JDBC catalog connection directly, which was never
+-- a supported combination for Flink specifically.
 
 SET 'execution.runtime-mode' = 'batch';
 -- Required, not optional, for the final SELECT below when run via
@@ -22,10 +32,8 @@ SET 'sql-client.execution.result-mode' = 'TABLEAU';
 
 CREATE CATALOG IF NOT EXISTS weir_smoke_catalog WITH (
   'type' = 'iceberg',
-  'catalog-type' = 'jdbc',
-  'uri' = 'jdbc:postgresql://postgres:5432/weir_catalog',
-  'jdbc.user' = 'weir',
-  'jdbc.password' = 'weir',
+  'catalog-type' = 'rest',
+  'uri' = 'http://iceberg-rest:8181',
   'warehouse' = 's3a://weir-warehouse/warehouse',
   'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO',
   's3.endpoint' = 'http://seaweedfs:8333',

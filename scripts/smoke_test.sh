@@ -64,7 +64,7 @@ make_readable_tmp() {
 # ------------------------------------------------------------
 echo "=== Step 2: docker compose ps - every service healthy ==="
 
-EXPECTED_SERVICES="weir-kafka weir-postgres weir-seaweedfs weir-flink-jobmanager weir-flink-taskmanager"
+EXPECTED_SERVICES="weir-kafka weir-postgres weir-seaweedfs weir-iceberg-rest weir-flink-jobmanager weir-flink-taskmanager"
 MAX_WAIT_SECONDS=180
 WAITED=0
 
