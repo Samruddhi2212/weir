@@ -425,3 +425,45 @@ verification tooling itself rather than in the thing being verified
 (see #16) - which is its own argument for actually running verification
 scripts repeatedly, under real conditions, rather than trusting them once
 they're merely written.
+
+## 18. Step 4 never had a verified-working query, and LIMIT vs. a bounded source is why
+
+With #17's timeout wrapper in place, step 4 didn't pass - it timed out at
+90s, consistently, on the CONCAT+TABLEAU query. This raised a question
+the earlier "PASS" runs can't actually answer: did step 4's *original*
+bare `SELECT * ... LIMIT 5` (before any of #14/#16/#17's fixes) ever
+really succeed, or was it silently swallowed by the old weak assertion
+(`[ -n "$STEP4_OUTPUT" ]`, "any output at all") the same way #14 found
+step 5 to be? `smoke_test.sh` only ever echoes a step's full raw output
+on failure, never on success, so there's no way to retroactively inspect
+what an old passing run's step 4 actually contained. Recorded honestly:
+unresolved, not assumed innocent.
+
+What's certain going forward, not inherited from an unverifiable past:
+`LIMIT` against Kafka - an inherently unbounded, streaming source - is
+the wrong tool for "read N messages and stop." `LIMIT` relies on the
+query engine noticing it has enough rows and cancelling the job
+underneath it; under `TABLEAU` result-mode (required for any
+non-interactive `-f` execution at all, per #16) that cancellation
+signal apparently doesn't arrive, or doesn't arrive within any
+reasonable bound.
+
+The correct tool, checked against Flink's own Kafka connector docs before
+using it: `scan.bounded.mode`. Not the first option reached for -
+`latest-offset`, the more commonly-documented bounded mode, has a
+confirmed open bug (FLINK-34470): transactional-producer control records
+can make its stopping-offset calculation hang indefinitely. Our producer
+(`kafka-console-producer.sh`, no `--transactional-id`) probably doesn't
+trigger it - but "probably doesn't trigger a known bug" is a reasoned
+guess, not the verified standard this project has been holding itself to
+all session. Used `specific-offsets` instead (`scan.bounded.specific-
+offsets = 'partition:0,offset:10'`): a static, literal stopping point
+with no dynamic offset negotiation of any kind, so there's no equivalent
+mechanism left to doubt.
+
+To settle the "slow vs. hung" question definitively rather than guess at
+it, both queries now run in the same CI job: `smoke_step4.sql` (bounded,
+gating, asserted) and the new, explicitly non-gating `smoke_step4_
+diagnostic_limit.sql` (the original LIMIT approach, 180s timeout,
+reported but not asserted). Whichever way that resolves, the gating
+check no longer depends on the answer.
