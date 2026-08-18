@@ -505,3 +505,48 @@ step-5 inconsistency so far, not a confirmed root cause. Proving it would
 need a run of steps 2-5 with the diagnostic fully absent (as it now is
 going forward) to see whether step 5 becomes consistently reliable, or
 whether something else is still in play.
+
+## 21. catalog-type=jdbc was never once actually flaky - it was reproducibly wrong
+
+#20's test: run steps 2-5 with the diagnostic (and its zombie-job risk)
+fully removed, to see if step 5 becomes reliable. It didn't. Ran five
+clean trials. All five failed, identically - same `Unknown catalog-type:
+jdbc` exception, same eight-line signature, every time. That's not
+flakiness; that's a deterministic result that happened to be interrupted,
+exactly once, by something else. The one prior "PASS" is the outlier
+needing an explanation now, not the failures - and it doesn't have one
+yet. It predates digest-pinning (#15), so it's possible some different
+image content was pulled that one time, but nothing in this project's
+records proves that; it's recorded as unresolved, not assumed.
+
+What five identical failures did settle, conclusively, backed by
+Iceberg's own source (already quoted in #11 and #18):
+`FlinkCatalogFactory.createCatalogLoader()` has exactly three valid
+values for `catalog-type` - `hive`, `hadoop`, `rest` - with an
+unconditional `default` throw for anything else. `jdbc` was never a
+fourth option. Not sometimes, not under most conditions - never, for
+Flink specifically. (Iceberg's JDBC catalog type is real and used by
+other engines; it was just never wired into Iceberg's Flink integration.)
+Weir's infrastructure had never actually run any of the three supported
+options - no Hive metastore, no REST catalog service.
+
+Fixed by adding an `iceberg-rest` service to `docker-compose.yml`
+(`tabulario/iceberg-rest:1.6.0`, digest-pinned, same image `reference/`
+used for this) and switching `scripts/sql/smoke_step5.sql`'s catalog
+config from `catalog-type=jdbc` / a direct Postgres URI to
+`catalog-type=rest` / `uri=http://iceberg-rest:8181`. The metadata store
+didn't change - it's still Postgres, now reached through the REST
+server's own `CATALOG_URI` instead of a direct connection from Flink.
+Flagging the image itself honestly: Docker Hub describes it as a "sample
+image for experimentation and testing," last pushed over a year before
+this pin - not an actively maintained production artifact, the same
+category of caveat this project already applied to MinIO/SeaweedFS/
+LocalStack when picking the object store.
+
+Why this is worth stating plainly: every fix from #14 through #20 was
+real and necessary, and none of them were the actual bug. The actual bug
+was a single wrong config value, present since this catalog was first
+written, that happened to coincidentally "work" once. Five for five
+identical, reproducible failures - not three, not a majority, all of
+them - is what made it possible to stop treating this as intermittent
+and go back to what the source code had said all along.

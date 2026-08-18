@@ -118,6 +118,48 @@ services:
       start_period: 15s
 
   # ------------------------------------------------------------
+  # Iceberg REST Catalog
+  # ------------------------------------------------------------
+  # Added after discovering (5/5 reproducible CI failures, confirmed
+  # against Iceberg 1.11.0's own source) that Iceberg's Flink integration
+  # never supports catalog-type=jdbc at all - only hive, hadoop, or rest.
+  # See DEFENSE.md #21. tabulario/iceberg-rest is the same image
+  # reference/ used for this; note it's a "sample image for
+  # experimentation and testing" per its own Docker Hub description, last
+  # pushed over a year before this pin, not an actively maintained
+  # production artifact - same category of scrutiny this project already
+  # applied to MinIO/SeaweedFS/LocalStack.
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.6.0@sha256:3b7d31bdfec626b68e97531c9778a1b9119659e456fe28545a49f6aa6a9ce472
+    container_name: weir-iceberg-rest
+    hostname: iceberg-rest
+    networks:
+      - weir
+    ports:
+      - "${ICEBERG_REST_PORT:-8181}:8181"
+    environment:
+      CATALOG_WAREHOUSE: s3a://weir-warehouse/warehouse
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://seaweedfs:8333
+      CATALOG_S3_ACCESS__KEY__ID: ${WEIR_S3_ACCESS_KEY:-admin}
+      CATALOG_S3_SECRET__ACCESS__KEY: ${WEIR_S3_SECRET_KEY:-***REMOVED***}
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      CATALOG_URI: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-weir_catalog}
+      CATALOG_JDBC_USER: ${POSTGRES_USER:-weir}
+      CATALOG_JDBC_PASSWORD: ${POSTGRES_PASSWORD:-weir}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8181/v1/config || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ------------------------------------------------------------
   # Flink JobManager
   # ------------------------------------------------------------
   flink-jobmanager:
@@ -160,6 +202,8 @@ services:
       postgres:
         condition: service_healthy
       seaweedfs:
+        condition: service_healthy
+      iceberg-rest:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8081/overview || exit 1"]
