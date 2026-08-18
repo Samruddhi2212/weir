@@ -1116,3 +1116,38 @@ any future streaming job (not only this validation) would have hit the
 identical failure the first time it tried to checkpoint. Ported to
 `main` in its own commit rather than folded silently into a step-6
 commit on this branch.
+
+## 31. An assertion-auditing bug found by auditing this script's own assertions: a diagnostic print swallowed into a variable instead of printed
+
+Explicitly asked to audit every assertion in this script against the
+class of bug in #14 - here's a real one, in the *plumbing* around an
+assertion rather than the comparison itself.
+
+`wait_for_checkpoints()` was called as `BASELINE_CHECKPOINTS="$(wait_for_
+checkpoints 3 180)"` - a command substitution, so the *entire* function's
+stdout becomes the captured value, not just the `echo "$completed"` line
+intended as its "return value." Its own failure path called `print_raw
+"final checkpoints JSON" "$cp_json"` to explain *why* it timed out - and
+that diagnostic output went into `$BASELINE_CHECKPOINTS` right along
+with everything else, never printed to the actual log at all. The second
+real run of this script (see #30 for the first) timed out at this exact
+stage, and the log showed the timeout message but not one byte of the
+diagnostic that was supposed to explain it - a checkpointing failure
+this project still doesn't have a root cause for yet, made harder to
+diagnose by the very telemetry meant to help.
+
+This isn't the #14 pattern itself (a check that passes when it
+shouldn't) - it's adjacent: a check that fails *correctly* while
+destroying the evidence needed to explain the failure, because "return a
+value" and "print diagnostics" were sharing the same channel (a
+function's stdout) without that being a deliberate choice.
+
+Fixed by giving the function's result its own channel - a global
+(`WAIT_RESULT`), set before returning, read by the caller afterward -
+freeing stdout entirely for `print_raw`/`echo` diagnostics, which is
+what every other stage in this script already uses stdout for. Also
+added a per-poll progress line (job state + checkpoint count, every 5s)
+rather than only printing at the very end, so a future timeout shows the
+whole trajectory - stuck at zero from the start, versus slowly climbing
+and running out of budget, are different findings and shouldn't require
+a third run just to tell apart.
