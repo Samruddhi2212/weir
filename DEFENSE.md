@@ -580,3 +580,40 @@ connect proves the port is open, not that the HTTP endpoint returns a
 real response - but a health check that actually runs and is honest
 about what it verifies beats one that fails for a reason unrelated to
 the thing it's supposed to be checking.
+
+## 23. AWS SDK v2 always requires a region, even against non-AWS S3
+
+With the healthcheck fixed, `CREATE CATALOG` (rest) started succeeding
+cleanly for the first time. The next statement, `CREATE TABLE`, then
+failed with an exception that has nothing to do with catalogs, jars, or
+anything this session had touched before:
+
+```
+Caused by: org.apache.iceberg.exceptions.ServiceFailureException: Server
+error: SdkClientException: Unable to load region from any of the
+providers in the chain ...: [SystemSettingsRegionProvider: Unable to
+load region from system settings. Region must be specified either via
+environment variable (AWS_REGION) or system property (aws.region).,
+AwsProfileRegionProvider: No region provided in profile: default,
+InstanceProfileRegionProvider: Unable to retrieve region information
+from EC2 Metadata service ...]
+```
+
+AWS SDK v2 (used by both `iceberg-rest`'s own S3 client, server-side, and
+Flink's S3FileIO client, writing actual data files) unconditionally
+requires a resolvable region before it will do anything, even when
+talking to a non-AWS S3-compatible endpoint (SeaweedFS) where the region
+concept is functionally meaningless - it's used for request signing and
+default endpoint construction in real AWS, neither of which matters once
+`s3.endpoint` is already pointing somewhere else entirely. The SDK
+doesn't know that; it still runs its full provider chain (env var, system
+property, profile, EC2 instance metadata) and fails outright if none of
+them resolve.
+
+Fixed by setting `AWS_REGION: us-east-1` - an arbitrary, syntactically
+valid placeholder, not a real target region - as a container environment
+variable on `iceberg-rest`, `flink-jobmanager`, and `flink-taskmanager`
+alike. All three run AWS SDK v2 S3 clients under the hood (the REST
+catalog server for its own S3 access; both Flink services for writing
+data files directly), so all three needed it, not just the one that
+happened to surface the error first.
