@@ -18,11 +18,18 @@
 # future change.
 #
 # SeaweedFS is started in docker-compose.yml with no -s3.config identity
-# file, so it has no credentials of its own configured to check against.
-# Step 5's WEIR_S3_ACCESS_KEY/WEIR_S3_SECRET_KEY (see .env.example) were
-# accepted by SeaweedFS in CI with their local-dev defaults - confirmed,
-# not assumed. That's SeaweedFS's default-permissive behavior when no
-# identity file is configured, not something this smoke test enforces.
+# file. Earlier revisions of this comment claimed that meant SeaweedFS was
+# "default-permissive" and accepted any access key/secret pair - that
+# claim was never actually backed by a signed S3 write reaching SeaweedFS;
+# it was inferred from an earlier catalog-type=jdbc-era run in which
+# catalog creation talked to Postgres directly and never touched S3 at
+# all. Confirmed since to be flatly wrong: with no identity configured,
+# SeaweedFS rejects every *signed* S3 request outright with `S3Exception:
+# Signed request requires setting up SeaweedFS S3 authentication` (see
+# DEFENSE.md #24) - the AWS SDK v2 clients both Flink's S3FileIO and
+# iceberg-rest use always sign their requests. The setup step below
+# configures a real identity via `weed shell`'s `s3.configure`, matching
+# WEIR_S3_ACCESS_KEY/WEIR_S3_SECRET_KEY, before step 5 ever runs.
 
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -32,6 +39,11 @@ cd "$(git rev-parse --show-toplevel)"
 # committed static files in scripts/sql/ instead (see DEFENSE.md #10).
 # Those files hardcode the matching literal values directly.
 TEST_TOPIC="weir-smoke-test"
+
+# Read here (not just in step 5) since the new SeaweedFS setup step below
+# also needs them - see DEFENSE.md #24.
+WEIR_S3_ACCESS_KEY="${WEIR_S3_ACCESS_KEY:-admin}"
+WEIR_S3_SECRET_KEY="${WEIR_S3_SECRET_KEY:-***REMOVED***}"
 
 fail() {
   echo ""
@@ -64,7 +76,7 @@ make_readable_tmp() {
 # ------------------------------------------------------------
 echo "=== Step 2: docker compose ps - every service healthy ==="
 
-EXPECTED_SERVICES="weir-kafka weir-postgres weir-seaweedfs weir-flink-jobmanager weir-flink-taskmanager"
+EXPECTED_SERVICES="weir-kafka weir-postgres weir-seaweedfs weir-iceberg-rest weir-flink-jobmanager weir-flink-taskmanager"
 MAX_WAIT_SECONDS=180
 WAITED=0
 
@@ -87,6 +99,34 @@ $PS_OUTPUT"
   sleep 5
 done
 echo "PASS: step 2 - all 5 services healthy"
+
+# ------------------------------------------------------------
+# Setup: SeaweedFS S3 identity + warehouse bucket
+# ------------------------------------------------------------
+# Not one of the numbered verification steps - this is precondition setup,
+# same role as `make up` itself, just not possible to fold into the image
+# or docker-compose.yml's `command:` cleanly (see DEFENSE.md #24 for why
+# that was tried and reverted). Runs every invocation, not just the first:
+# `s3.configure -apply` creates-or-updates the identity idempotently, and
+# CI never ran `make seed` before this (the warehouse bucket has never
+# actually existed in any CI run to date - a second, latent gap this
+# closes at the same time as the auth one).
+echo ""
+echo "=== Setup: configure SeaweedFS S3 identity, create warehouse bucket ==="
+
+docker compose exec -T seaweedfs sh -c \
+  "echo 's3.configure -user=weir -access_key=${WEIR_S3_ACCESS_KEY} -secret_key=${WEIR_S3_SECRET_KEY} -actions=Admin,Read,Write,List,Tagging -apply' | weed shell" \
+  || fail "setup: could not configure SeaweedFS S3 identity"
+
+# No idempotency guarantee found for s3.bucket.create in SeaweedFS's docs
+# or source (unlike s3.configure, which its own source describes as
+# create-or-update) - `|| true` so a second run against an already-seeded
+# stack doesn't fail here, same lenient treatment as step 3's topic-delete
+# line below.
+docker compose exec -T seaweedfs sh -c \
+  'echo "s3.bucket.create -name weir-warehouse" | weed shell' || true
+
+echo "PASS: setup - SeaweedFS identity configured, warehouse bucket present"
 
 # ------------------------------------------------------------
 # Step 3: Kafka round-trip, no Flink involved
@@ -164,32 +204,21 @@ STEP4_MATCHED="$(echo "$STEP4_OUTPUT" | grep -oE 'WEIR_MSG=[0-9]+' | wc -l | tr 
 $STEP4_OUTPUT"
 echo "PASS: step 4 - Flink read from Kafka, no classpath errors"
 
-# --------------------------------------------------------------
-# Step 4 diagnostic (non-gating): does the original LIMIT-based
-# approach merely take longer under TABLEAU mode, or hang regardless
-# of timeout length? Reported, not asserted - see DEFENSE.md #18.
-# --------------------------------------------------------------
-echo ""
-echo "=== Step 4 diagnostic: LIMIT-based read, longer timeout, non-gating ==="
-DIAG_OUTPUT="$(timeout 180 docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /opt/weir/sql/smoke_step4_diagnostic_limit.sql 2>&1)"
-DIAG_EXIT=$?
-DIAG_MATCHED="$(echo "$DIAG_OUTPUT" | grep -oE 'WEIR_MSG=[0-9]+' | wc -l | tr -d '[:space:]')"
-
-if [ "$DIAG_EXIT" -eq 124 ]; then
-  echo "DIAGNOSTIC: LIMIT-based read timed out after 180s (still hanging, not just slow)."
-elif [ "$DIAG_EXIT" -eq 0 ] && [ "$DIAG_MATCHED" = "5" ]; then
-  echo "DIAGNOSTIC: LIMIT-based read succeeded (5 tagged messages) - was slow, not hung."
-else
-  echo "DIAGNOSTIC: LIMIT-based read neither timed out nor succeeded cleanly (exit=$DIAG_EXIT, matched=$DIAG_MATCHED). Full output:"
-  echo "$DIAG_OUTPUT"
-fi
+# The step 4 diagnostic (LIMIT-based read, longer timeout) that lived
+# here has been removed. It answered its question - the LIMIT approach
+# genuinely hangs, confirmed at 180s, not just slow - and removing it
+# turned out to matter for a second reason: `timeout` only kills the
+# local `docker compose exec` client, not the remote Flink job, so the
+# hung diagnostic query likely kept running in the cluster as a zombie
+# job after being "killed" locally, right before step 5 submitted its
+# own job. See DEFENSE.md #20.
 
 # ------------------------------------------------------------
 # Step 5: write to Iceberg via the single catalog config
 # ------------------------------------------------------------
 echo ""
 echo "=== Step 5: write to Iceberg, verify rows landed ==="
-echo "(SeaweedFS has no configured S3 credentials - see script header)"
+echo "(using the SeaweedFS identity configured in the setup step above)"
 
 # scripts/sql/smoke_step5.sql is static and committed (DEFENSE.md #10),
 # containing no credential values at all - only the sentinel tokens
@@ -198,8 +227,8 @@ echo "(SeaweedFS has no configured S3 credentials - see script header)"
 # it goes to a make_readable_tmp() file instead (world-readable, so the
 # non-root flink user can read it after docker compose cp - see
 # DEFENSE.md #10/#11) and gets copied in fresh each run.
-WEIR_S3_ACCESS_KEY="${WEIR_S3_ACCESS_KEY:-admin}"
-WEIR_S3_SECRET_KEY="${WEIR_S3_SECRET_KEY:-***REMOVED***}"
+# WEIR_S3_ACCESS_KEY/WEIR_S3_SECRET_KEY are set near the top of this
+# script - the setup step above needs them too, not just this one.
 
 STEP5_SQL_RESOLVED="$(make_readable_tmp)"
 # | as sed delimiter, not /, since s3a:// paths already use / - a

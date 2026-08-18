@@ -585,3 +585,269 @@ with `SET 'execution.checkpointing.interval' = '10s';` scoping the
 wide default. This is a recommendation, not a decision made unilaterally
 - if a real compiled job (Python or Java) is wanted instead, for its own
 reasons, that's a call this project doesn't get to make for you.
+
+## 20. The diagnostic answered its question, then became a resource-contention risk
+
+Ran once, got a clean answer, then got removed. The #18 diagnostic ran in
+CI: `smoke_step4.sql` (bounded via `scan.bounded.mode`) passed cleanly;
+`smoke_step4_diagnostic_limit.sql` (the original LIMIT approach) timed
+out at 180s. That settles "slow vs. hung" definitively - it hangs, it
+doesn't just take longer - and closes the question #18 left open about
+whether step 4 ever actually worked before this session's fixes.
+
+The same run's step 5 then failed with the exact `Unknown catalog-type:
+jdbc` error from #14/#15/#16 - and this run used the digest-pinned image
+committed in #15, meaning the mutable-tag hypothesis is now
+disconfirmed as the explanation, not just unproven. Checked the jar
+manifest #15's CI step captures: one copy each of every Iceberg/Hadoop
+jar, correct versions, no duplicates - rules out a classpath conflict as
+well.
+
+What's left, not yet proven but the most concrete lead so far: `timeout
+180` on the host kills the local `docker compose exec` client process.
+It does not cancel the remote Flink job - Flink has no built-in signal
+propagation from a killed CLI client to the job running on the cluster.
+The diagnostic query, confirmed hanging, most likely kept running as an
+orphaned job inside the cluster - consuming a task slot, a Kafka consumer
+group, network buffers - for the rest of that CI run, including through
+step 5's job submission immediately after. This project's own container
+only has `taskmanager.numberOfTaskSlots: 4` configured; a leaked slot is
+not nothing.
+
+Removed the diagnostic (`scripts/sql/smoke_step4_diagnostic_limit.sql`
+and its call site in `smoke_test.sh`) rather than keep it around: its
+question is answered, and every future run would otherwise re-carry the
+same resource-leak risk for no further information gained. Left
+unresolved and stated as such: this is the most concrete lead for the
+step-5 inconsistency so far, not a confirmed root cause. Proving it would
+need a run of steps 2-5 with the diagnostic fully absent (as it now is
+going forward) to see whether step 5 becomes consistently reliable, or
+whether something else is still in play.
+
+## 21. catalog-type=jdbc was never once actually flaky - it was reproducibly wrong
+
+#20's test: run steps 2-5 with the diagnostic (and its zombie-job risk)
+fully removed, to see if step 5 becomes reliable. It didn't. Ran five
+clean trials. All five failed, identically - same `Unknown catalog-type:
+jdbc` exception, same eight-line signature, every time. That's not
+flakiness; that's a deterministic result that happened to be interrupted,
+exactly once, by something else. The one prior "PASS" is the outlier
+needing an explanation now, not the failures - and it doesn't have one
+yet. It predates digest-pinning (#15), so it's possible some different
+image content was pulled that one time, but nothing in this project's
+records proves that; it's recorded as unresolved, not assumed.
+
+What five identical failures did settle, conclusively, backed by
+Iceberg's own source (already quoted in #11 and #18):
+`FlinkCatalogFactory.createCatalogLoader()` has exactly three valid
+values for `catalog-type` - `hive`, `hadoop`, `rest` - with an
+unconditional `default` throw for anything else. `jdbc` was never a
+fourth option. Not sometimes, not under most conditions - never, for
+Flink specifically. (Iceberg's JDBC catalog type is real and used by
+other engines; it was just never wired into Iceberg's Flink integration.)
+Weir's infrastructure had never actually run any of the three supported
+options - no Hive metastore, no REST catalog service.
+
+Fixed by adding an `iceberg-rest` service to `docker-compose.yml`
+(`tabulario/iceberg-rest:1.6.0`, digest-pinned, same image `reference/`
+used for this) and switching `scripts/sql/smoke_step5.sql`'s catalog
+config from `catalog-type=jdbc` / a direct Postgres URI to
+`catalog-type=rest` / `uri=http://iceberg-rest:8181`. The metadata store
+didn't change - it's still Postgres, now reached through the REST
+server's own `CATALOG_URI` instead of a direct connection from Flink.
+Flagging the image itself honestly: Docker Hub describes it as a "sample
+image for experimentation and testing," last pushed over a year before
+this pin - not an actively maintained production artifact, the same
+category of caveat this project already applied to MinIO/SeaweedFS/
+LocalStack when picking the object store.
+
+Why this is worth stating plainly: every fix from #14 through #20 was
+real and necessary, and none of them were the actual bug. The actual bug
+was a single wrong config value, present since this catalog was first
+written, that happened to coincidentally "work" once. Five for five
+identical, reproducible failures - not three, not a majority, all of
+them - is what made it possible to stop treating this as intermittent
+and go back to what the source code had said all along.
+
+## 22. The new iceberg-rest healthcheck used a tool that isn't in that image
+
+#21's fix shipped with `curl -f http://localhost:8181/v1/config` as
+`iceberg-rest`'s healthcheck - copied from the same pattern used
+elsewhere in this file without checking what's actually inside this
+specific image first. It failed immediately in CI: the container's own
+logs showed a completely clean startup (Jetty started, listening on
+`0.0.0.0:8181`, zero errors) while Docker reported it unhealthy for the
+entire retry budget - the exact same signature as the Kafka healthcheck
+bug (DEFENSE.md #12).
+
+Checked this time before re-guessing: `iceberg-rest`'s actual source
+(`databricks/iceberg-rest-image`'s Dockerfile) is `FROM azul/zulu-
+openjdk:17-jre-headless`, a minimal JRE-only image. Its own Dockerfile
+installs nothing beyond the compiled jar in the runtime stage - no curl,
+no wget, nothing. The healthcheck command didn't exist in the container,
+full stop, same as `kafka-broker-api-versions.sh` not being on `PATH`
+was a different flavor of the same mistake: assuming a tool is present
+in a container instead of checking.
+
+Fixed with bash's `/dev/tcp` (`bash -c 'exec 3<>/dev/tcp/localhost/8181'`)
+- no external binary required, just a shell builtin. Confirmed bash
+itself is actually present (Debian-based Azul Zulu images ship it) before
+relying on it, rather than trading one unverified-tool assumption for
+another. Weaker than the curl check it replaces - a successful TCP
+connect proves the port is open, not that the HTTP endpoint returns a
+real response - but a health check that actually runs and is honest
+about what it verifies beats one that fails for a reason unrelated to
+the thing it's supposed to be checking.
+
+## 23. AWS SDK v2 always requires a region, even against non-AWS S3
+
+With the healthcheck fixed, `CREATE CATALOG` (rest) started succeeding
+cleanly for the first time. The next statement, `CREATE TABLE`, then
+failed with an exception that has nothing to do with catalogs, jars, or
+anything this session had touched before:
+
+```
+Caused by: org.apache.iceberg.exceptions.ServiceFailureException: Server
+error: SdkClientException: Unable to load region from any of the
+providers in the chain ...: [SystemSettingsRegionProvider: Unable to
+load region from system settings. Region must be specified either via
+environment variable (AWS_REGION) or system property (aws.region).,
+AwsProfileRegionProvider: No region provided in profile: default,
+InstanceProfileRegionProvider: Unable to retrieve region information
+from EC2 Metadata service ...]
+```
+
+AWS SDK v2 (used by both `iceberg-rest`'s own S3 client, server-side, and
+Flink's S3FileIO client, writing actual data files) unconditionally
+requires a resolvable region before it will do anything, even when
+talking to a non-AWS S3-compatible endpoint (SeaweedFS) where the region
+concept is functionally meaningless - it's used for request signing and
+default endpoint construction in real AWS, neither of which matters once
+`s3.endpoint` is already pointing somewhere else entirely. The SDK
+doesn't know that; it still runs its full provider chain (env var, system
+property, profile, EC2 instance metadata) and fails outright if none of
+them resolve.
+
+Fixed by setting `AWS_REGION: us-east-1` - an arbitrary, syntactically
+valid placeholder, not a real target region - as a container environment
+variable on `iceberg-rest`, `flink-jobmanager`, and `flink-taskmanager`
+alike. All three run AWS SDK v2 S3 clients under the hood (the REST
+catalog server for its own S3 access; both Flink services for writing
+data files directly), so all three needed it, not just the one that
+happened to surface the error first.
+
+## 24. SeaweedFS rejects every signed S3 request with no identity configured - and an earlier comment in this project said the opposite
+
+With #23's region fix in place, `CREATE TABLE smoke_iceberg_table` got
+past region resolution and failed with a new, unrelated exception:
+
+```
+Caused by: org.apache.iceberg.exceptions.ServiceFailureException: Server
+error: S3Exception: Signed request requires setting up SeaweedFS S3
+authentication (Service: S3, Status Code: 400, Request ID:
+18CCC605A040438B2074511D)
+```
+
+`docker-compose.yml`'s `seaweedfs` service has always started with `weed
+server -s3 ...` and no `-s3.config` flag - no identity file, no
+configured access key/secret at all. Both AWS SDK v2 clients that touch
+this store (`iceberg-rest`'s own S3 client, and Flink's S3FileIO) always
+sign their requests; SeaweedFS's S3 gateway rejects a signed request
+outright when it has no identity to validate the signature against.
+
+This directly contradicts a claim already committed in this project, in
+three places (`scripts/smoke_test.sh`'s header comment,
+`scripts/sql/smoke_step5.sql`'s comment, `.env.example`'s SeaweedFS
+section): that SeaweedFS with no identity file is "default-permissive"
+and "accepts any access key/secret pair, confirmed in CI." Checked how
+that claim could have been written: it dates from the `catalog-type=jdbc`
+era (#21), when `CREATE CATALOG` talked to Postgres directly and no
+statement ever reached S3 at all - so "CI didn't fail on auth" at the
+time was true but never actually exercised a signed S3 request in the
+first place. The claim was inferred, not confirmed, and it was wrong. All
+three comments are corrected in this same change to state what's now
+actually verified: SeaweedFS with no identity configured rejects signed
+requests, full stop.
+
+**Alternatives considered:**
+
+1. Bake a static `-s3.config` JSON identity file into the image or a
+   config mount, with credentials matching `WEIR_S3_ACCESS_KEY`/
+   `WEIR_S3_SECRET_KEY`'s defaults. Rejected: this repeats the exact
+   mistake `smoke_step5.sql`'s sentinel-token approach was built to avoid
+   (DEFENSE.md #10/#12) - a real credential value (even a local-dev
+   default) sitting in a committed file, now duplicated in a second
+   place, with no substitution mechanism keeping the two in sync if the
+   default ever changes.
+2. Generate the identity file at container startup from
+   `WEIR_S3_ACCESS_KEY`/`WEIR_S3_SECRET_KEY`, via a shell-wrapped
+   `command:` override in `docker-compose.yml` (`sh -c` writing the JSON
+   with `printf`, then `exec weed server -s3.config=...`). Drafted, then
+   abandoned before committing: getting the quoting right across three
+   nested layers - YAML's own `${VAR}` interpolation (needing `$$` to
+   suppress it), the outer `sh -c "..."` string, and literal double
+   quotes for the JSON payload inside it - was exactly the kind of thing
+   this project's own discipline says not to ship un-tested. It couldn't
+   be verified without a real Docker run, and getting it wrong would have
+   produced a new, confusing parse-time failure instead of the auth
+   failure being fixed.
+3. **Chosen:** configure the identity at runtime via `weed shell`'s
+   `s3.configure -user=... -access_key=... -secret_key=... -actions=...
+   -apply` (flags confirmed against SeaweedFS's own
+   `weed/shell/command_s3_configure.go` source, not guessed), run from
+   `scripts/smoke_test.sh` right after step 2 confirms every service
+   healthy. `-apply` is documented in that source as create-or-update,
+   so this is idempotent across repeated local runs, not just the first.
+   One nested shell level, not three, and it reuses the exact
+   `docker compose exec ... sh -c 'echo "..." | weed shell'` pattern this
+   project's own Makefile `seed` target already used for bucket creation
+   - extended with the same identity, rather than inventing new quoting.
+
+**A second, latent bug found while fixing this one:** CI's "Start stack"
+step (`.github/workflows/ci.yml`) has only ever run `docker compose up -d
+--build`, never `make seed`. The `weir-warehouse` bucket referenced by
+every SQL fixture's `warehouse` option has never actually existed in any
+CI run to date. It hadn't surfaced yet because catalog-type=jdbc (#21)
+never got far enough to write to S3, and catalog-type=rest didn't get
+past region resolution (#23) until now. Fixed in the same change: the new
+setup step in `smoke_test.sh` also runs `s3.bucket.create -name
+weir-warehouse` (best-effort, `|| true` - no idempotency guarantee found
+for this specific command in SeaweedFS's docs or source, unlike
+`s3.configure`), so a from-scratch CI run and a repeated local run both
+end up with the bucket present. `Makefile`'s `seed` target got the
+identical two-line update, kept as a still-useful standalone target for
+manual workflows that don't go through `smoke_test.sh` at all.
+
+**Confirmed, not just inferred, by the actual CI run that followed this
+change:** `s3.configure -apply` does take effect on an already-running
+`weed server -s3` process with no restart involved - the setup step's
+own stdout showed the created identity object (echoed back as JSON) and
+`created bucket weir-warehouse`, and every subsequent SQL statement
+(`CREATE CATALOG`, `CREATE TABLE`, `INSERT`) succeeded with zero
+`S3Exception` of any kind. The signed-request-authentication problem
+this entry set out to fix is resolved.
+
+**A second, distinct bug surfaced in the same run, after the fix above
+was already working:** the row-count check still failed - not on an
+auth error this time, but `WEIR_ROW_COUNT=0` instead of `2`. The INSERT
+statement's own output read `[INFO] SQL update statement has been
+successfully submitted to the cluster: Job ID: ...` - submitted, not
+completed. Checked against Flink's own SQL Client docs before treating
+this as flaky: by default, SQL Client submits DML as a detached job and
+immediately moves on to the next statement; it does not wait for the
+job to finish. Running via `-f` with no interactive pause means the
+`SELECT COUNT(*)` on the very next line was guaranteed to race the
+INSERT's job, not occasionally risk it - this would have failed 100% of
+the time, every run, not just this one. Fixed with `SET 'table.dml-sync'
+= 'true';`, documented for exactly this: it makes SQL Client block until
+a submitted DML statement's job actually completes before returning
+control for the next statement. Added to `smoke_step5.sql` only -
+`smoke_step4.sql` has no DML statement to race against, only a SELECT.
+
+**Re-verification, not just a single pass:** given this project's own
+history of a single green run turning out to mean nothing (#20/#21 - five
+identical failures after one earlier, unexplained pass), the identical
+commit was re-run five times via `gh run rerun` rather than trusted on
+the first green result. All five: pass, `WEIR_ROW_COUNT=2`, no
+`S3Exception`, no `table.dml-sync` timeout. Step 5 - and steps 2 through
+5 as a whole - is genuinely green, not a lucky single run.
