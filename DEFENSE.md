@@ -617,3 +617,98 @@ alike. All three run AWS SDK v2 S3 clients under the hood (the REST
 catalog server for its own S3 access; both Flink services for writing
 data files directly), so all three needed it, not just the one that
 happened to surface the error first.
+
+## 24. SeaweedFS rejects every signed S3 request with no identity configured - and an earlier comment in this project said the opposite
+
+With #23's region fix in place, `CREATE TABLE smoke_iceberg_table` got
+past region resolution and failed with a new, unrelated exception:
+
+```
+Caused by: org.apache.iceberg.exceptions.ServiceFailureException: Server
+error: S3Exception: Signed request requires setting up SeaweedFS S3
+authentication (Service: S3, Status Code: 400, Request ID:
+18CCC605A040438B2074511D)
+```
+
+`docker-compose.yml`'s `seaweedfs` service has always started with `weed
+server -s3 ...` and no `-s3.config` flag - no identity file, no
+configured access key/secret at all. Both AWS SDK v2 clients that touch
+this store (`iceberg-rest`'s own S3 client, and Flink's S3FileIO) always
+sign their requests; SeaweedFS's S3 gateway rejects a signed request
+outright when it has no identity to validate the signature against.
+
+This directly contradicts a claim already committed in this project, in
+three places (`scripts/smoke_test.sh`'s header comment,
+`scripts/sql/smoke_step5.sql`'s comment, `.env.example`'s SeaweedFS
+section): that SeaweedFS with no identity file is "default-permissive"
+and "accepts any access key/secret pair, confirmed in CI." Checked how
+that claim could have been written: it dates from the `catalog-type=jdbc`
+era (#21), when `CREATE CATALOG` talked to Postgres directly and no
+statement ever reached S3 at all - so "CI didn't fail on auth" at the
+time was true but never actually exercised a signed S3 request in the
+first place. The claim was inferred, not confirmed, and it was wrong. All
+three comments are corrected in this same change to state what's now
+actually verified: SeaweedFS with no identity configured rejects signed
+requests, full stop.
+
+**Alternatives considered:**
+
+1. Bake a static `-s3.config` JSON identity file into the image or a
+   config mount, with credentials matching `WEIR_S3_ACCESS_KEY`/
+   `WEIR_S3_SECRET_KEY`'s defaults. Rejected: this repeats the exact
+   mistake `smoke_step5.sql`'s sentinel-token approach was built to avoid
+   (DEFENSE.md #10/#12) - a real credential value (even a local-dev
+   default) sitting in a committed file, now duplicated in a second
+   place, with no substitution mechanism keeping the two in sync if the
+   default ever changes.
+2. Generate the identity file at container startup from
+   `WEIR_S3_ACCESS_KEY`/`WEIR_S3_SECRET_KEY`, via a shell-wrapped
+   `command:` override in `docker-compose.yml` (`sh -c` writing the JSON
+   with `printf`, then `exec weed server -s3.config=...`). Drafted, then
+   abandoned before committing: getting the quoting right across three
+   nested layers - YAML's own `${VAR}` interpolation (needing `$$` to
+   suppress it), the outer `sh -c "..."` string, and literal double
+   quotes for the JSON payload inside it - was exactly the kind of thing
+   this project's own discipline says not to ship un-tested. It couldn't
+   be verified without a real Docker run, and getting it wrong would have
+   produced a new, confusing parse-time failure instead of the auth
+   failure being fixed.
+3. **Chosen:** configure the identity at runtime via `weed shell`'s
+   `s3.configure -user=... -access_key=... -secret_key=... -actions=...
+   -apply` (flags confirmed against SeaweedFS's own
+   `weed/shell/command_s3_configure.go` source, not guessed), run from
+   `scripts/smoke_test.sh` right after step 2 confirms every service
+   healthy. `-apply` is documented in that source as create-or-update,
+   so this is idempotent across repeated local runs, not just the first.
+   One nested shell level, not three, and it reuses the exact
+   `docker compose exec ... sh -c 'echo "..." | weed shell'` pattern this
+   project's own Makefile `seed` target already used for bucket creation
+   - extended with the same identity, rather than inventing new quoting.
+
+**A second, latent bug found while fixing this one:** CI's "Start stack"
+step (`.github/workflows/ci.yml`) has only ever run `docker compose up -d
+--build`, never `make seed`. The `weir-warehouse` bucket referenced by
+every SQL fixture's `warehouse` option has never actually existed in any
+CI run to date. It hadn't surfaced yet because catalog-type=jdbc (#21)
+never got far enough to write to S3, and catalog-type=rest didn't get
+past region resolution (#23) until now. Fixed in the same change: the new
+setup step in `smoke_test.sh` also runs `s3.bucket.create -name
+weir-warehouse` (best-effort, `|| true` - no idempotency guarantee found
+for this specific command in SeaweedFS's docs or source, unlike
+`s3.configure`), so a from-scratch CI run and a repeated local run both
+end up with the bucket present. `Makefile`'s `seed` target got the
+identical two-line update, kept as a still-useful standalone target for
+manual workflows that don't go through `smoke_test.sh` at all.
+
+**Not yet confirmed, stated honestly:** whether `s3.configure -apply`
+takes effect on an already-running `weed server -s3` process without a
+restart. SeaweedFS's own wiki confirms the `-s3.config` file's
+auto-reload behavior (SIGHUP-driven) but doesn't document this for the
+shell-driven path specifically; the command's own description ("update
+and apply s3 configuration") reads as live-effect, and the identity store
+`s3.configure` writes to is managed by the master/filer the running `-s3`
+process is already talking to, not a separate per-process file - but this
+is inference from the source and wiki, not yet proven by a passing CI
+run. If step 5 still fails on the same `S3Exception` after this change,
+that inference is the first thing to revisit, not a re-guess at something
+else.
