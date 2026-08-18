@@ -147,6 +147,12 @@ services:
       CATALOG_URI: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-weir_catalog}
       CATALOG_JDBC_USER: ${POSTGRES_USER:-weir}
       CATALOG_JDBC_PASSWORD: ${POSTGRES_PASSWORD:-weir}
+      # AWS SDK v2 always requires a resolvable region, even against
+      # non-AWS S3-compatible storage where the region is functionally
+      # meaningless - confirmed via the actual exception this produced
+      # (SdkClientException: Unable to load region from any of the
+      # providers in the chain). See DEFENSE.md #23.
+      AWS_REGION: us-east-1
     depends_on:
       postgres:
         condition: service_healthy
@@ -196,6 +202,10 @@ services:
       # (GoogleCloudPlatform/flink-on-k8s-operator#213).
       FLINK_PROPERTIES: |
         execution.checkpointing.interval: ${WEIR_CHECKPOINT_INTERVAL:-60s}
+      # Same AWS SDK v2 region requirement as iceberg-rest's - Flink's
+      # own S3FileIO client (writing actual data files) hits the
+      # identical SdkClientException otherwise. See DEFENSE.md #23.
+      AWS_REGION: us-east-1
     volumes:
       - flink-checkpoints:/tmp/flink-checkpoints
       - flink-savepoints:/tmp/flink-savepoints
@@ -236,6 +246,7 @@ services:
     environment:
       FLINK_PROPERTIES: |
         execution.checkpointing.interval: ${WEIR_CHECKPOINT_INTERVAL:-60s}
+      AWS_REGION: us-east-1
     volumes:
       - flink-checkpoints:/tmp/flink-checkpoints
       - flink-savepoints:/tmp/flink-savepoints
