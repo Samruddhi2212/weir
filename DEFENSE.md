@@ -733,3 +733,49 @@ commit was re-run five times via `gh run rerun` rather than trusted on
 the first green result. All five: pass, `WEIR_ROW_COUNT=2`, no
 `S3Exception`, no `table.dml-sync` timeout. Step 5 - and steps 2 through
 5 as a whole - is genuinely green, not a lucky single run.
+
+## 25. A latent infrastructure bug in the base image, only reachable once a job actually checkpoints
+
+Found on the `exactly-once-validation` branch, while building step 6's
+continuous Kafka -> Iceberg validation job - but the bug itself lives
+here, in `docker/flink/Dockerfile`, and would hit any streaming job on
+`main` too, not just that branch's work. Ported here in its own commit
+rather than left stranded on a feature branch.
+
+First submission of a genuinely continuous streaming job (unlike
+`smoke_step4.sql`/`smoke_step5.sql`, both bounded/batch) failed before
+the job even started running:
+
+```
+Caused by: java.io.IOException: Failed to create directory for shared state: file:/tmp/flink-checkpoints/<job-id>/shared
+	at org.apache.flink.runtime.state.filesystem.FsCheckpointStorageAccess.initializeBaseLocationsForCheckpoint(...)
+	at org.apache.flink.runtime.checkpoint.CheckpointCoordinator.<init>(...)
+```
+
+Root cause: `docker/flink/Dockerfile` never creates `/tmp/flink-
+checkpoints` or `/tmp/flink-savepoints` - those paths have only ever
+existed via `docker-compose.yml`'s named volumes, mounted over a path
+the image itself has nothing at. A fresh named volume with no matching
+content already in the image gets created at first mount owned by
+root, not by the non-root `flink` user (uid 9999, confirmed from
+`apache/flink-docker`'s own Dockerfile) this image runs as. Same root
+cause as DEFENSE.md #10 - a non-root user meeting something it can't
+write to - but on a directory Docker creates at mount time, not a file
+this project copies in.
+
+**Why this was never caught before, honestly:** `execution.checkpointing.
+interval: 60s` (DEFENSE.md #1) applies cluster-wide regardless of job
+type, but batch execution doesn't enable checkpointing the way a
+continuous streaming job does - nothing submitted on `main` before this
+had ever actually asked the JobManager to construct checkpoint storage.
+The permission problem was latent since `docker-compose.yml` first added
+those volumes, reachable by any streaming job, just never triggered
+because none had been submitted yet.
+
+**Fixed** in `docker/flink/Dockerfile`, before `USER flink`: `mkdir -p
+/tmp/flink-checkpoints /tmp/flink-savepoints && chown -R flink:flink
+...`. Docker's documented behavior for named volumes - content (and
+ownership) already present in the image at a mount point gets copied
+into a freshly created volume on first mount - means this is enough; no
+entrypoint wrapper, no runtime chown, no change to `docker-compose.yml`
+at all.

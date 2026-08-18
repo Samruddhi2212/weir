@@ -34,6 +34,16 @@
 # left open a real, unresolved hypothesis for a step-5 inconsistency
 # between two otherwise-identical CI runs. Digest resolved from Docker
 # Hub's registry API on 2026-08-17 (see DEFENSE.md #15).
+#
+# /tmp/flink-checkpoints and /tmp/flink-savepoints are pre-created here,
+# owned by flink:flink, before docker-compose.yml's named volumes ever
+# mount over them - Docker copies whatever a mount point already
+# contains (including ownership) into a fresh named volume on first
+# mount. Without this, the mount point gets created at container start
+# owned by root, and the non-root `flink` user this image runs as
+# (see DEFENSE.md #10 - same class of bug, this time on a directory
+# instead of a copied-in file) can't write into it, which only ever
+# surfaces once a job actually tries to checkpoint - see DEFENSE.md #25.
 
 FROM flink:2.1.0-java21@sha256:11d31310a00763e0927325c6fcfe65961c9170c05ce421b9458b923004e95895
 
@@ -43,6 +53,9 @@ ARG POSTGRES_JDBC_VERSION=42.7.13
 ARG HADOOP_VERSION=3.4.3
 
 USER root
+
+RUN mkdir -p /tmp/flink-checkpoints /tmp/flink-savepoints && \
+    chown -R flink:flink /tmp/flink-checkpoints /tmp/flink-savepoints
 
 RUN set -eux; \
     cd /opt/flink/lib; \
