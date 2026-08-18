@@ -30,6 +30,15 @@ SET 'execution.runtime-mode' = 'batch';
 -- `sql-client.sh -f` (non-interactive) - see smoke_step4.sql's comment
 -- and DEFENSE.md #16.
 SET 'sql-client.execution.result-mode' = 'TABLEAU';
+-- By default SQL Client submits INSERT as a detached job and moves on
+-- immediately - "successfully submitted to the cluster" means submitted,
+-- not finished. Without this, the SELECT below can (and did, in CI) run
+-- before the INSERT's job has actually committed any rows, reading 0
+-- back deterministically rather than 2 - not a flaky race, a guaranteed
+-- one, since -f runs every statement back-to-back with no delay at all.
+-- Confirmed against Flink's own SQL Client docs (table.dml-sync). See
+-- DEFENSE.md #24.
+SET 'table.dml-sync' = 'true';
 
 CREATE CATALOG IF NOT EXISTS weir_smoke_catalog WITH (
   'type' = 'iceberg',
