@@ -467,3 +467,121 @@ gating, asserted) and the new, explicitly non-gating `smoke_step4_
 diagnostic_limit.sql` (the original LIMIT approach, 180s timeout,
 reported but not asserted). Whichever way that resolves, the gating
 check no longer depends on the answer.
+
+## 19. How Flink's checkpoint barrier coordinates with Iceberg's commit protocol
+
+Written before any of step 6's code, on purpose - if this can't be
+explained correctly first, the code that depends on it can't be trusted
+either.
+
+**The general mechanism (not Iceberg-specific).** Flink's checkpointing
+is a distributed snapshot (Chandy-Lamport style). The JobManager tells
+source operators to checkpoint; each source records its own restart
+position (for a Kafka source, the consumed offsets) and emits a special
+*barrier* record, tagged with a checkpoint ID, into every output channel.
+Every downstream operator does *barrier alignment*: on receiving a
+barrier on one input channel, it holds back new records on that channel
+until the same barrier has arrived on *all* its input channels. Only
+once aligned does the operator snapshot its own state and forward the
+barrier downstream. This guarantees a single, globally consistent cut
+across the whole dataflow graph, not just a per-operator local snapshot.
+Once every operator (source through sink) has acknowledged its part of
+checkpoint N to the JobManager, the JobManager marks checkpoint N
+complete and fires `notifyCheckpointComplete(N)` on every operator.
+
+**What Iceberg's Flink sink does with this, specifically.** It's not one
+operator, it's two, chained: `IcebergStreamWriter` (parallel, one
+instance per subtask) followed by `IcebergFilesCommitter` (a single,
+non-parallel instance). When the writer receives checkpoint N's barrier,
+it flushes whatever rows it's buffered into closed, durable data files
+(Parquet, in this project's config) on the object store, and emits a
+*committable* downstream describing those files - it does **not** touch
+the Iceberg catalog at this point. The committer collects committables
+from all writer subtasks for checkpoint N and holds them as its own
+pending state (itself included in checkpoint N's snapshot, so a crash
+here isn't lost - the restored committer still has the pending record).
+Only on `notifyCheckpointComplete(N)` - proof that *every* operator's
+part of checkpoint N is durably persisted - does the committer actually
+commit: it builds a new Iceberg snapshot referencing exactly those data
+files and atomically updates the catalog pointer to it. Confirmed against
+Iceberg's own docs (`flink-writes.md`): "Iceberg commit happened after
+successful Flink checkpoint in the `notifyCheckpointComplete` callback."
+
+**What makes this exactly-once instead of at-least-once.** The commit
+that makes data *visible* (the new Iceberg snapshot) is deferred until
+Flink's own checkpoint - source offsets included - is fully durable. If
+anything fails before `notifyCheckpointComplete` fires, Flink doesn't
+try to finish that checkpoint; it restarts the whole job from the last
+*completed* checkpoint, replaying the Kafka source from exactly the
+offsets recorded there. Whatever data files the writer had already
+flushed for the failed attempt are simply never referenced by any
+manifest - not rolled back, just never wired in - and the replayed data
+gets written and committed fresh. So each Iceberg snapshot corresponds to
+exactly one Flink checkpoint's worth of data: a checkpoint either
+completes fully (offsets advanced and data committed, as a unit, from
+any external reader's point of view) or is treated as if it never ran.
+That's what rules out both failure modes at once - no gaps (the next
+completed checkpoint always resumes from the last *committed* offset)
+and no duplicates (a replayed checkpoint's output either commits once or
+not at all, never twice). The second half of "not twice": a *retried*
+commit of the same checkpoint (e.g. the JDBC commit to Postgres succeeds
+but the acknowledgment back to Flink is lost) also can't double-commit -
+Iceberg's snapshot summary records the last successfully committed
+checkpoint ID, and the committer checks it before committing again.
+Deferred commit prevents a crash from producing a duplicate; checkpoint-
+id idempotency prevents a *retry* from producing one.
+
+**Where the vulnerability window actually is.** Between the writer
+flushing data files to the object store (on barrier receipt) and the
+committer's catalog update actually completing (on
+`notifyCheckpointComplete`). Inside that window, the files are real,
+durable, and sitting in SeaweedFS - but nothing in the catalog points to
+them yet. Anything that fails in that window - JobManager crash,
+TaskManager crash, a network partition to Postgres during the commit
+transaction - leaves those specific files exactly where an orphan check
+should find them.
+
+**What "orphaned file" means, concretely, for
+`scripts/verify_exactly_once.py`.** Iceberg tracks table contents through
+a metadata tree: table metadata -> snapshot -> manifest list -> manifest
+files -> individual data file entries. A file is orphaned if it
+physically exists under the table's warehouse path in the object store
+but is not reachable by walking that tree from *any* snapshot, past or
+present. It's not a duplicate (it's never visible to a reader - nothing
+points to it) and it's not a gap (the data it contains, if any was ever
+meant to be committed, was re-processed and committed via the replay);
+it's wasted storage from an interrupted commit, nothing more. Detecting
+it means listing every file actually present under the warehouse prefix
+and diffing that against the set of file paths referenced by every
+manifest of every snapshot currently in the table's metadata.
+
+**PyFlink or Java - the honest answer.** It depends on which Iceberg API
+the job uses, and the two have different language support:
+
+- Iceberg's Table API / SQL integration (`CREATE CATALOG` /
+  `CREATE TABLE` / `INSERT INTO ... SELECT ...`) - exactly what
+  `scripts/sql/smoke_step4.sql` and `smoke_step5.sql` already use - works
+  fully from PyFlink. PyFlink's Table API is a complete wrapper over the
+  same Java table planner; there's no capability gap. Iceberg's own docs
+  state the exactly-once guarantee applies to both its DataStream and
+  Table API integrations, and a real user got PyFlink+Iceberg working
+  (blocked only by JAR-packaging constraints on a managed runtime, not by
+  any PyFlink API limitation - `apache/iceberg#4633`).
+- Iceberg's lower-level DataStream sink builder
+  (`org.apache.iceberg.flink.sink.FlinkSink.forRowData(...)`), which
+  gives finer-grained programmatic control over the write path, is
+  documented only in Java. No PyFlink-native equivalent is documented or
+  was found. If that specific API is what's wanted, Java is required.
+
+Given this project's existing, already-debugged classpath (Kafka SQL
+connector, Iceberg runtime + JDBC catalog, Hadoop client jars, all
+already proven to load correctly in `docker/flink/Dockerfile`'s image),
+the recommendation is: don't introduce a new dependency surface (a
+PyFlink Python environment, or a Java job compilation/packaging
+pipeline) for this validation at all. Express step 6's Flink job as SQL,
+submitted via `sql-client.sh` exactly like the smoke test already does,
+with `SET 'execution.checkpointing.interval' = '10s';` scoping the
+10-second interval to that session's job without touching the cluster-
+wide default. This is a recommendation, not a decision made unilaterally
+- if a real compiled job (Python or Java) is wanted instead, for its own
+reasons, that's a call this project doesn't get to make for you.
