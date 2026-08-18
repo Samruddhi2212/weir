@@ -153,7 +153,16 @@ services:
       seaweedfs:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8181/v1/config || exit 1"]
+      # Not curl: this image's own Dockerfile (databricks/iceberg-rest-
+      # image) is FROM azul/zulu-openjdk:17-jre-headless, a minimal JRE
+      # image with no curl or wget installed at all - confirmed from its
+      # actual Dockerfile, not assumed. Same bug class as the Kafka
+      # healthcheck (DEFENSE.md #12), caught before it shipped this time.
+      # bash's own /dev/tcp is a TCP-connect check only, not a real HTTP
+      # health check (no verification of a 200 response) - weaker than
+      # curl would have been, but actually runs, and Debian-based Azul
+      # Zulu images do include bash.
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8181' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5

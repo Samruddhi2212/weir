@@ -550,3 +550,33 @@ written, that happened to coincidentally "work" once. Five for five
 identical, reproducible failures - not three, not a majority, all of
 them - is what made it possible to stop treating this as intermittent
 and go back to what the source code had said all along.
+
+## 22. The new iceberg-rest healthcheck used a tool that isn't in that image
+
+#21's fix shipped with `curl -f http://localhost:8181/v1/config` as
+`iceberg-rest`'s healthcheck - copied from the same pattern used
+elsewhere in this file without checking what's actually inside this
+specific image first. It failed immediately in CI: the container's own
+logs showed a completely clean startup (Jetty started, listening on
+`0.0.0.0:8181`, zero errors) while Docker reported it unhealthy for the
+entire retry budget - the exact same signature as the Kafka healthcheck
+bug (DEFENSE.md #12).
+
+Checked this time before re-guessing: `iceberg-rest`'s actual source
+(`databricks/iceberg-rest-image`'s Dockerfile) is `FROM azul/zulu-
+openjdk:17-jre-headless`, a minimal JRE-only image. Its own Dockerfile
+installs nothing beyond the compiled jar in the runtime stage - no curl,
+no wget, nothing. The healthcheck command didn't exist in the container,
+full stop, same as `kafka-broker-api-versions.sh` not being on `PATH`
+was a different flavor of the same mistake: assuming a tool is present
+in a container instead of checking.
+
+Fixed with bash's `/dev/tcp` (`bash -c 'exec 3<>/dev/tcp/localhost/8181'`)
+- no external binary required, just a shell builtin. Confirmed bash
+itself is actually present (Debian-based Azul Zulu images ship it) before
+relying on it, rather than trading one unverified-tool assumption for
+another. Weaker than the curl check it replaces - a successful TCP
+connect proves the port is open, not that the HTTP endpoint returns a
+real response - but a health check that actually runs and is honest
+about what it verifies beats one that fails for a reason unrelated to
+the thing it's supposed to be checking.
