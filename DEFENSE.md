@@ -1151,3 +1151,70 @@ rather than only printing at the very end, so a future timeout shows the
 whole trajectory - stuck at zero from the start, versus slowly climbing
 and running out of budget, are different findings and shouldn't require
 a third run just to tell apart.
+
+## 32. The "continuous" job wasn't continuous - it finished on its own in ~2 seconds, reading zero records
+
+With #31's fix in place, the third real run finally showed what stage 5
+had been timing out on: `job state=FINISHED, completed checkpoints=1`
+from the very first poll, unchanged for the full 180s. The job's own
+`/jobs/<id>` detail, pulled before failing:
+
+```
+"state":"FINISHED","job-type":"STREAMING","start-time":...,"end-time":...,"duration":3011,
+"vertices":[{"name":"Source: eos_kafka_source[1] -> IcebergStreamWriter -> ...",
+  "status":"FINISHED",...,"metrics":{"read-records":0,"read-records-complete":true,
+  "write-records":0,"write-records-complete":true,...}}]
+```
+
+Not a crash, not a hang - `job-type` is genuinely `STREAMING` (confirming
+`execution.checkpointing.interval`/`min-pause`/`runtime-mode` overrides
+from DEFENSE.md #28 *were* applied), and the job voluntarily completed
+in about 3 seconds having read zero records, with `read-records-complete:
+true` - a Flink-internal signal specifically meaning the source decided
+it had no more data coming, not that it errored or was cancelled. The
+single "completed checkpoint" is consistent with a final checkpoint
+taken as part of that voluntary shutdown, not a periodic 10s checkpoint
+during real execution - the job never lived long enough for a second
+periodic one regardless.
+
+Checked before accepting a guess: Flink's own Kafka source documentation
+states the default stopping-offsets initializer for an unbounded source
+(`NoStoppingOffsetsInitializer`) "does not initialize anything" and the
+source "never stops until the Flink job fails or is cancelled" absent an
+explicit `scan.bounded.mode` - which this job's DDL never set. That's
+the *documented* default behavior, and it's what should have happened
+here. It didn't, and stated honestly: the exact internal mechanism that
+made *this* source finish anyway - something specific to a single-
+partition topic that is still completely empty (0 messages, consumer
+position already equal to the high watermark) at the moment the source
+starts - was not tracked down to a specific line of Flink or the Kafka
+connector's source. This project's own timeline explains why the
+condition existed: `scripts/verify_recovery.sh` created the topic (stage
+2) and submitted the job (previously stage 3) *before* starting the
+producer (previously stage 4) - by design, reasoning at the time that
+`scan.startup.mode='earliest-offset'` made the ordering irrelevant to
+correctness. It made the topic genuinely empty at the exact moment the
+source read from it, which turned out to matter for a different reason
+than data correctness.
+
+**Fixed two ways, not one, because the mechanism itself isn't fully
+confirmed:**
+
+1. Reordered `scripts/verify_recovery.sh`: the producer now starts
+   first (new stage 3), confirmed running for 3 seconds before the job
+   is submitted (new stage 4) - the source's very first poll has real
+   data waiting, removing the empty-topic condition entirely.
+2. Added `'scan.topic-partition-discovery.interval' = '10s'` to
+   `eos_kafka_source` in `exactly_once_job.sql` - continuous partition
+   discovery instead of the connector's one-time-at-startup default, as
+   a second, complementary line of defense in case the actual mechanism
+   is related to split/partition enumeration finalizing early rather
+   than (or in addition to) the empty-topic condition itself.
+
+Recorded as two fixes rather than confidently claiming one root cause,
+because that's the honest state of the investigation: the reorder
+directly removes the specific condition observed in the failing run: the
+partition-discovery setting is a reasoned hedge, not a confirmed
+independent fix. If a future run still finishes early with a non-empty
+topic at start, the discovery setting - not a new guess - is the next
+thing to test in isolation.

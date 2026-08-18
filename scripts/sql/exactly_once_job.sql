@@ -56,10 +56,18 @@ CREATE TABLE eos_kafka_source (
   'properties.bootstrap.servers' = 'kafka:9092',
   'properties.group.id' = 'weir-eos-verify',
   'format' = 'json',
-  -- Single partition (see DEFENSE.md #28's scope note): reading from the
-  -- beginning means the read doesn't race the producer's own start time
-  -- - correctness here doesn't depend on which of the two starts first.
-  'scan.startup.mode' = 'earliest-offset'
+  -- Single partition (see DEFENSE.md #28's scope note).
+  'scan.startup.mode' = 'earliest-offset',
+  -- Continuous partition discovery, not one-time enumeration - added
+  -- after this job reached FINISHED on its own within ~2s against a
+  -- genuinely empty topic (0 records read, job-type STREAMING, not
+  -- crashed or hung - a real voluntary completion). scripts/
+  -- verify_recovery.sh was also reordered to start the producer before
+  -- this job is ever submitted, removing the empty-topic condition
+  -- outright; this setting is a second, complementary line of defense,
+  -- not fully proven to be the actual mechanism on its own. See
+  -- DEFENSE.md #32 - reported honestly as not fully root-caused yet.
+  'scan.topic-partition-discovery.interval' = '10s'
 );
 
 -- Detached: no `SET 'table.dml-sync' = 'true';` here, unlike
