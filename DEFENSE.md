@@ -725,3 +725,11 @@ the time, every run, not just this one. Fixed with `SET 'table.dml-sync'
 a submitted DML statement's job actually completes before returning
 control for the next statement. Added to `smoke_step5.sql` only -
 `smoke_step4.sql` has no DML statement to race against, only a SELECT.
+
+**Re-verification, not just a single pass:** given this project's own
+history of a single green run turning out to mean nothing (#20/#21 - five
+identical failures after one earlier, unexplained pass), the identical
+commit was re-run five times via `gh run rerun` rather than trusted on
+the first green result. All five: pass, `WEIR_ROW_COUNT=2`, no
+`S3Exception`, no `table.dml-sync` timeout. Step 5 - and steps 2 through
+5 as a whole - is genuinely green, not a lucky single run.
