@@ -168,46 +168,18 @@ print_raw "kafka-topics.sh --create" "$CREATE_TOPIC_OUTPUT"
 echo "PASS: stage 2 - topic created"
 
 # ------------------------------------------------------------
-# Stage 3: submit the Flink SQL job (detached)
+# Stage 3: start the producer BEFORE the job exists
 # ------------------------------------------------------------
+# Order swapped from this script's first two real runs (see DEFENSE.md
+# #32): submitting the job against a genuinely empty topic (0 messages,
+# consumer position already equal to the high watermark) made the job
+# reach FINISHED on its own within ~2s, read-records=0 - not a hang, not
+# a crash, a real streaming job voluntarily completing as if it were
+# bounded. Starting the producer first means the source's very first
+# poll already has real data waiting, removing the empty-topic condition
+# entirely rather than fully explaining why it mattered.
 echo ""
-echo "=== Stage 3: submit exactly-once job ==="
-JOB_SQL_RESOLVED="$(make_readable_tmp)"
-sed \
-  -e "s|__WEIR_S3_ACCESS_KEY__|${WEIR_S3_ACCESS_KEY}|" \
-  -e "s|__WEIR_S3_SECRET_KEY__|${WEIR_S3_SECRET_KEY}|" \
-  -e "s|__WEIR_EOS_CHECKPOINT_INTERVAL__|${WEIR_EOS_CHECKPOINT_INTERVAL}|" \
-  -e "s|__WEIR_EOS_TOPIC__|${WEIR_EOS_TOPIC}|" \
-  scripts/sql/exactly_once_job.sql > "$JOB_SQL_RESOLVED"
-
-docker compose cp "$JOB_SQL_RESOLVED" flink-jobmanager:/tmp/weir_exactly_once_job_resolved.sql \
-  || fail "stage 3: could not copy resolved SQL script into flink-jobmanager"
-rm -f "$JOB_SQL_RESOLVED"
-
-SUBMIT_OUTPUT="$(timeout 90 docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /tmp/weir_exactly_once_job_resolved.sql 2>&1)"
-SUBMIT_EXIT=$?
-print_raw "sql-client.sh (job submission)" "$SUBMIT_OUTPUT"
-
-if [ "$SUBMIT_EXIT" -eq 124 ]; then
-  dump_logs_and_fail "stage 3: sql-client timed out after 90s submitting the job"
-fi
-[ "$SUBMIT_EXIT" -eq 0 ] || dump_logs_and_fail "stage 3: sql-client exited $SUBMIT_EXIT submitting the job"
-
-# Flink job IDs are 32 lowercase hex characters - validated exactly, not
-# just "found something that looked like an ID" (DEFENSE.md #14's lesson
-# applied here too).
-JOB_ID_CANDIDATE="$(echo "$SUBMIT_OUTPUT" | grep -oE 'Job ID: [0-9a-f]+' | head -1 | sed -E 's/Job ID: //')"
-if ! echo "$JOB_ID_CANDIDATE" | grep -qE '^[0-9a-f]{32}$'; then
-  fail "stage 3: could not extract a valid 32-char hex job ID from submission output (got: '$JOB_ID_CANDIDATE')"
-fi
-JOB_ID="$JOB_ID_CANDIDATE"
-echo "PASS: stage 3 - job submitted, Job ID = $JOB_ID"
-
-# ------------------------------------------------------------
-# Stage 4: start the producer
-# ------------------------------------------------------------
-echo ""
-echo "=== Stage 4: start producer (~${WEIR_EOS_EVENTS_PER_SEC}/sec) ==="
+echo "=== Stage 3: start producer (~${WEIR_EOS_EVENTS_PER_SEC}/sec) ==="
 "$PYTHON_BIN" scripts/produce_events.py \
   --bootstrap-server "localhost:${KAFKA_PORT}" \
   --topic "$WEIR_EOS_TOPIC" \
@@ -218,9 +190,45 @@ PRODUCER_PID=$!
 sleep 3
 if ! kill -0 "$PRODUCER_PID" 2>/dev/null; then
   print_raw "producer log" "$(cat artifacts/eos_producer.log 2>/dev/null || true)"
-  fail "stage 4: producer process (pid $PRODUCER_PID) died within 3s of starting"
+  fail "stage 3: producer process (pid $PRODUCER_PID) died within 3s of starting"
 fi
-echo "PASS: stage 4 - producer running (pid $PRODUCER_PID)"
+echo "PASS: stage 3 - producer running (pid $PRODUCER_PID), topic has real data before the job ever reads it"
+
+# ------------------------------------------------------------
+# Stage 4: submit the Flink SQL job (detached)
+# ------------------------------------------------------------
+echo ""
+echo "=== Stage 4: submit exactly-once job ==="
+JOB_SQL_RESOLVED="$(make_readable_tmp)"
+sed \
+  -e "s|__WEIR_S3_ACCESS_KEY__|${WEIR_S3_ACCESS_KEY}|" \
+  -e "s|__WEIR_S3_SECRET_KEY__|${WEIR_S3_SECRET_KEY}|" \
+  -e "s|__WEIR_EOS_CHECKPOINT_INTERVAL__|${WEIR_EOS_CHECKPOINT_INTERVAL}|" \
+  -e "s|__WEIR_EOS_TOPIC__|${WEIR_EOS_TOPIC}|" \
+  scripts/sql/exactly_once_job.sql > "$JOB_SQL_RESOLVED"
+
+docker compose cp "$JOB_SQL_RESOLVED" flink-jobmanager:/tmp/weir_exactly_once_job_resolved.sql \
+  || fail "stage 4: could not copy resolved SQL script into flink-jobmanager"
+rm -f "$JOB_SQL_RESOLVED"
+
+SUBMIT_OUTPUT="$(timeout 90 docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /tmp/weir_exactly_once_job_resolved.sql 2>&1)"
+SUBMIT_EXIT=$?
+print_raw "sql-client.sh (job submission)" "$SUBMIT_OUTPUT"
+
+if [ "$SUBMIT_EXIT" -eq 124 ]; then
+  dump_logs_and_fail "stage 4: sql-client timed out after 90s submitting the job"
+fi
+[ "$SUBMIT_EXIT" -eq 0 ] || dump_logs_and_fail "stage 4: sql-client exited $SUBMIT_EXIT submitting the job"
+
+# Flink job IDs are 32 lowercase hex characters - validated exactly, not
+# just "found something that looked like an ID" (DEFENSE.md #14's lesson
+# applied here too).
+JOB_ID_CANDIDATE="$(echo "$SUBMIT_OUTPUT" | grep -oE 'Job ID: [0-9a-f]+' | head -1 | sed -E 's/Job ID: //')"
+if ! echo "$JOB_ID_CANDIDATE" | grep -qE '^[0-9a-f]{32}$'; then
+  fail "stage 4: could not extract a valid 32-char hex job ID from submission output (got: '$JOB_ID_CANDIDATE')"
+fi
+JOB_ID="$JOB_ID_CANDIDATE"
+echo "PASS: stage 4 - job submitted, Job ID = $JOB_ID"
 
 # ------------------------------------------------------------
 # Stage 5: wait for >=3 completed checkpoints (baseline, pre-kill)
