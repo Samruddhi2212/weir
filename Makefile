@@ -9,7 +9,12 @@ down: ## Stop all services and remove volumes
 logs: ## Tail service logs
 	docker compose logs -f
 
-seed: ## Create the S3 warehouse bucket
+seed: ## Configure the SeaweedFS S3 identity and create the warehouse bucket
+	# SeaweedFS starts with no -s3.config identity file (see docker-compose.yml),
+	# so it rejects any signed S3 request outright until an identity exists -
+	# see DEFENSE.md #24. `s3.configure -apply` creates-or-updates it live,
+	# no restart required. Defaults match .env.example.
+	docker compose exec -T seaweedfs sh -c "echo 's3.configure -user=weir -access_key=$${WEIR_S3_ACCESS_KEY:-admin} -secret_key=$${WEIR_S3_SECRET_KEY:-password123} -actions=Admin,Read,Write,List,Tagging -apply' | weed shell"
 	docker compose exec -T seaweedfs sh -c 'echo "s3.bucket.create -name weir-warehouse" | weed shell'
 
 test: ## Run the test suite

@@ -10,9 +10,10 @@
 -- vars, see .env.example) into a temp copy before this file ever reaches
 -- the container - this static file, as committed, never contains a real
 -- or even placeholder-literal credential value. SeaweedFS in docker-
--- compose.yml has no -s3.config identity file, so it has no configured
--- access key/secret of its own to match against - if this fails on auth,
--- that's a real finding, not a bug in this file.
+-- compose.yml has no -s3.config identity file baked in; smoke_test.sh's
+-- setup step configures the matching identity live, via `weed shell`,
+-- before this file ever runs (see DEFENSE.md #24) - if this fails on
+-- auth, that's a real finding, not a bug in this file.
 --
 -- catalog-type is 'rest', not 'jdbc': Iceberg's FlinkCatalogFactory never
 -- supports 'jdbc' at all - confirmed from its own source, and confirmed
