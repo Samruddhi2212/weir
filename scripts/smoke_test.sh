@@ -154,15 +154,35 @@ $STEP4_OUTPUT"
 
 # Exact count of the sentinel marker, not "any output at all" (that was
 # nearly tautological - sql-client prints substantial banner/log output
-# whether or not the query actually returned anything). LIMIT 5 means
-# exactly 5 is the only correct answer; 0 means the query errored or
-# returned nothing without tripping the exit-code/error-pattern checks
-# above, and must fail here instead of passing silently (see DEFENSE.md
-# #14).
+# whether or not the query actually returned anything). The source is
+# scan.bounded.mode-bounded to exactly offsets 0-9 (see smoke_step4.sql),
+# so 10 is the only correct answer; 0 means the query errored or returned
+# nothing without tripping the exit-code/error-pattern checks above, and
+# must fail here instead of passing silently (see DEFENSE.md #14).
 STEP4_MATCHED="$(echo "$STEP4_OUTPUT" | grep -oE 'WEIR_MSG=[0-9]+' | wc -l | tr -d '[:space:]')"
-[ "$STEP4_MATCHED" = "5" ] || fail "step 4: expected 5 tagged messages, got $STEP4_MATCHED. Full output:
+[ "$STEP4_MATCHED" = "10" ] || fail "step 4: expected 10 tagged messages, got $STEP4_MATCHED. Full output:
 $STEP4_OUTPUT"
 echo "PASS: step 4 - Flink read from Kafka, no classpath errors"
+
+# --------------------------------------------------------------
+# Step 4 diagnostic (non-gating): does the original LIMIT-based
+# approach merely take longer under TABLEAU mode, or hang regardless
+# of timeout length? Reported, not asserted - see DEFENSE.md #18.
+# --------------------------------------------------------------
+echo ""
+echo "=== Step 4 diagnostic: LIMIT-based read, longer timeout, non-gating ==="
+DIAG_OUTPUT="$(timeout 180 docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /opt/weir/sql/smoke_step4_diagnostic_limit.sql 2>&1)"
+DIAG_EXIT=$?
+DIAG_MATCHED="$(echo "$DIAG_OUTPUT" | grep -oE 'WEIR_MSG=[0-9]+' | wc -l | tr -d '[:space:]')"
+
+if [ "$DIAG_EXIT" -eq 124 ]; then
+  echo "DIAGNOSTIC: LIMIT-based read timed out after 180s (still hanging, not just slow)."
+elif [ "$DIAG_EXIT" -eq 0 ] && [ "$DIAG_MATCHED" = "5" ]; then
+  echo "DIAGNOSTIC: LIMIT-based read succeeded (5 tagged messages) - was slow, not hung."
+else
+  echo "DIAGNOSTIC: LIMIT-based read neither timed out nor succeeded cleanly (exit=$DIAG_EXIT, matched=$DIAG_MATCHED). Full output:"
+  echo "$DIAG_OUTPUT"
+fi
 
 # ------------------------------------------------------------
 # Step 5: write to Iceberg via the single catalog config

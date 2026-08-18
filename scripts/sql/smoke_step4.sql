@@ -13,6 +13,17 @@
 -- by hitting this directly in CI (see DEFENSE.md #16).
 SET 'sql-client.execution.result-mode' = 'TABLEAU';
 
+-- scan.bounded.mode=specific-offsets, not LIMIT against an unbounded
+-- streaming source: relying on LIMIT to terminate a continuous Kafka
+-- read hung indefinitely under TABLEAU result-mode (see DEFENSE.md #18).
+-- specific-offsets was chosen over the more common latest-offset bounded
+-- mode specifically to avoid a known, confirmed open bug (FLINK-34470:
+-- transactional-producer control records can make latest-offset's
+-- stopping-offset calculation hang indefinitely) - our producer isn't
+-- transactional, but specific-offsets has no such dynamic negotiation at
+-- all, so there's nothing to verify there instead of assuming safety.
+-- offset:10 means "stop before offset 10", i.e. read offsets 0-9 - all
+-- 10 messages step 3 actually produced.
 CREATE TABLE IF NOT EXISTS smoke_kafka_source (
   message STRING
 ) WITH (
@@ -21,6 +32,8 @@ CREATE TABLE IF NOT EXISTS smoke_kafka_source (
   'properties.bootstrap.servers' = 'kafka:9092',
   'properties.group.id' = 'weir-smoke-consumer',
   'scan.startup.mode' = 'earliest-offset',
+  'scan.bounded.mode' = 'specific-offsets',
+  'scan.bounded.specific-offsets' = 'partition:0,offset:10',
   'format' = 'raw'
 );
 
@@ -29,4 +42,5 @@ CREATE TABLE IF NOT EXISTS smoke_kafka_source (
 -- (e.g. just the digit) would risk matching unrelated digits elsewhere in
 -- sql-client's own output (jar version strings like "...-2.1.0.jar"
 -- contain bare digits too) - see DEFENSE.md #14 for why this matters.
-SELECT CONCAT('WEIR_MSG=', message) AS tagged_message FROM smoke_kafka_source LIMIT 5;
+-- No LIMIT - the bounded source above already stops after all 10 messages.
+SELECT CONCAT('WEIR_MSG=', message) AS tagged_message FROM smoke_kafka_source;
