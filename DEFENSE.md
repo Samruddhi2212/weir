@@ -1239,3 +1239,33 @@ already does for job recovery) - failing within one 5-second poll cycle
 of the state actually changing, not 180 seconds later, so the next run's
 log dump has a real chance of showing what actually happened instead of
 three minutes of unrelated noise.
+
+**Second addendum - the fail-fast fix worked, and immediately exposed a
+third, different gap in the investigation itself.** The fifth real run
+failed within 5 seconds as intended, but `dump_logs_and_fail`'s
+container-log dump still showed nothing but container *startup* banners
+(`Starting Job Manager`, `Starting standalonesession as a console
+application`) - no job-lifecycle or source-completion messages at all,
+regardless of timing. `docker compose logs` only surfaces what a
+container prints to its own stdout/stderr; Flink's `standalonesession`
+entrypoint runs as "a console application" for supervisory output only
+- its actual operational logging (job state transitions, source/split
+lifecycle) goes to log *files* inside the container
+(`/opt/flink/log/*.log`), never touching stdout at all. Three
+consecutive real runs have now each surfaced a genuine gap before ever
+reaching the underlying question - a broken diagnostic swallowing
+output (#31), a timeout dumping logs 175s too late (#32's first
+addendum), and now dumping the wrong log source entirely.
+
+**Status, stated plainly rather than pushed further right now:** the
+underlying bug - a nominally-continuous streaming Kafka source reaching
+`FINISHED` with zero records read, even with confirmed live data in the
+topic before the job was ever submitted - is not yet root-caused.
+Parked here, not abandoned silently: the concrete next step is reading
+`/opt/flink/log/*.log` directly (via `docker compose exec ... cat`, not
+`docker compose logs`) at the moment of failure, to see what the
+JobManager and TaskManager actually logged about the source/split
+lifecycle - not a new guess, the specific gap this addendum identifies.
+This is deliberately being set aside now to start Part 2.1 (NYC TLC
+downloader + replay producer, which only needs Kafka, already green) in
+parallel, per explicit instruction not to block on this.
