@@ -1218,3 +1218,24 @@ partition-discovery setting is a reasoned hedge, not a confirmed
 independent fix. If a future run still finishes early with a non-empty
 topic at start, the discovery setting - not a new guess - is the next
 thing to test in isolation.
+
+**Addendum - the fourth real run disproved the reorder's assumption
+outright.** With the producer confirmed running for 3 seconds before
+the job was submitted, the job still finished, in about 3 seconds,
+having read zero records - the exact same signature as before, just a
+few seconds later. The empty-topic-at-start theory is now disproven by
+direct evidence, not just unconfirmed: the topic demonstrably had data
+by the time this job read from it, and it still happened.
+
+That run also exposed a second problem in the *investigation* itself:
+`dump_logs_and_fail`'s `--tail=200` container-log dump ran only after
+the full 180s wait budget expired, by which point 175+ seconds of
+routine Kafka heartbeat/consumer-group logging had scrolled whatever the
+JobManager logged at actual completion time out of a 200-line window -
+the diagnostic evidence was gone before it was ever captured, for the
+second run in a row. Fixed by treating `FINISHED`/`FAILED`/`CANCELED` as
+terminal inside `wait_for_checkpoints` itself (mirroring what stage 8
+already does for job recovery) - failing within one 5-second poll cycle
+of the state actually changing, not 180 seconds later, so the next run's
+log dump has a real chance of showing what actually happened instead of
+three minutes of unrelated noise.
