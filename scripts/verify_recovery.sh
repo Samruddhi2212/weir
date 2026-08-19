@@ -257,6 +257,20 @@ wait_for_checkpoints() {
       WAIT_RESULT="$completed"
       return 0
     fi
+    # FINISHED/FAILED/CANCELED are terminal for a job that's supposed to
+    # run continuously - failing immediately here, instead of waiting
+    # out the full budget, matters for a reason beyond speed: this
+    # script's earlier runs (DEFENSE.md #32) discovered the job finished
+    # in ~3s, but by the time a 180s-later dump_logs_and_fail pulled
+    # container logs, 175+ seconds of unrelated Kafka heartbeat noise had
+    # already scrolled the actually-relevant JobManager log lines out of
+    # a --tail=200 window - the diagnostic evidence was gone before it
+    # was ever captured.
+    if [ "$state" = "FINISHED" ] || [ "$state" = "FAILED" ] || [ "$state" = "CANCELED" ]; then
+      print_raw "checkpoints JSON at terminal state" "$cp_json"
+      print_raw "job status JSON at terminal state" "$job_json"
+      return 1
+    fi
     waited=$((waited + 5))
     if [ "$waited" -ge "$budget" ]; then
       print_raw "final checkpoints JSON" "$cp_json"
