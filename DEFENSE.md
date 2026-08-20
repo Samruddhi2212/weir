@@ -779,3 +779,73 @@ ownership) already present in the image at a mount point gets copied
 into a freshly created volume on first mount - means this is enough; no
 entrypoint wrapper, no runtime chown, no change to `docker-compose.yml`
 at all.
+
+## 26. Part 2.1: NYC TLC downloader and time-compressed replay producer
+
+Written before any of this code, per the standing rule reaffirmed this
+session: the explanation comes first, or the code doesn't get written.
+This work only needs Kafka, already green - deliberately started while
+the `exactly-once-validation` branch's own bug (DEFENSE.md #32) stays
+parked and unresolved rather than blocking on it.
+
+**Dataset scope.** Yellow Taxi trip records only, not green/FHV/HVFHV -
+the most standard, widely-referenced TLC dataset, and one dataset is
+enough to validate the download-and-replay mechanism itself. Default
+month `2025-01` (real file, confirmed reachable: `curl -I` against
+`https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2025-01.parquet`
+returned `200 OK`, `Content-Length: 59158238`), overridable via
+`--year-month` - not hardcoded as the *only* option, since TLC publishes
+monthly and a real benchmark run will eventually want more than one
+month's data.
+
+**Download mechanism: Python's stdlib `urllib`, not `requests`.** Not
+asked as a dependency question because it doesn't need to be one - a
+streamed HTTP GET with a status check is well within what `urllib`
+handles directly, and `requests` would be a second HTTP client library
+in a project that has had zero need for one until now. `pyarrow` (asked
+about, approved) is the only new dependency this component adds.
+
+**Trip identity: synthetic, not a TLC-provided field.** The Yellow Taxi
+schema has no natural per-trip unique key - confirmed by reading each
+downloaded file's own embedded Parquet schema at runtime rather than
+assuming a fixed, hardcoded column list (TLC's schema has changed
+slightly release to release; reading the file's actual schema and
+failing loudly if an expected column - `tpep_pickup_datetime` - is
+missing is more robust than trusting a column list written down once).
+The replay producer generates a key from the row's ordinal position in
+the sorted-by-pickup-time sequence (`tlc-yellow-2025-01-000001`, ...) -
+stable and unique for a single file, sufficient for what this component
+does (produce realistic-shaped traffic), not intended as a durable
+cross-run trip identifier.
+
+**Time compression.** Sorted by `tpep_pickup_datetime` ascending, then
+replayed with the wall-clock gap between consecutive sends equal to the
+real inter-arrival delta divided by `--speed-factor` (default `3600`:
+one real hour of trip arrivals compressed into one replayed second) -
+preserving the *shape* of the arrival pattern (rush-hour bursts, overnight
+lulls) rather than a flat, unrealistic constant rate. Capped at
+`--max-inter-arrival-sleep` (default `5` seconds): a real gap in the data
+(an overnight lull, a data quality hole) divided by 3600 could still be
+a multi-minute wait uncompressed further, and this is a replay tool, not
+a faithful real-time simulator - the cap is a deliberate, stated
+tradeoff, not an unexamined shortcut.
+
+**Zone IDs left unresolved.** `PULocationID`/`DOLocationID` are passed
+through as TLC's own integer zone IDs, not joined against TLC's separate
+`taxi_zone_lookup.csv` to resolve human-readable borough/zone names.
+Resolving them is a real, addable enhancement, not attempted here - it's
+a second dataset and a join this component doesn't need to prove out the
+download-and-replay mechanism itself.
+
+**Producer library: `kafka-python`, reusing DEFENSE.md #25's decision,
+not a fresh dependency question.** Same delivery-confirmed-callback
+reasoning applies, though this component doesn't need step 6's emission
+log specifically - it's producing realistic seed/benchmark traffic, not
+validating exactly-once semantics, so a delivery failure is logged and
+raised, not written to a ground-truth file nothing downstream compares
+against yet.
+
+**Runtime lineage:** not emitted by this producer. Runtime lineage
+emission is deferred project-wide (CLAUDE.md rule 7, docs/FUTURE_WORK.md,
+README's "Lineage: declared, not runtime-emitted" section) - this
+component doesn't carve out an exception for itself.

@@ -46,6 +46,18 @@ docker-compose.override.yml
 *.duckdb
 
 # ============================================================
+# Downloaded raw datasets (NYC TLC trip data, etc.) - large binary
+# Parquet files, re-downloadable from the source, never committed.
+# ============================================================
+data/
+
+# ============================================================
+# Runtime artifacts (emission logs, producer logs, JSON reports) from
+# validation/replay scripts - regenerated per run, never committed.
+# ============================================================
+artifacts/
+
+# ============================================================
 # benchmarks/results raw dumps
 # ============================================================
 # .gitignore has no file-size predicate - it can only match paths/globs,
