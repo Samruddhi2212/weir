@@ -43,12 +43,17 @@ directories or files exist for these.
   later without touching `config/flink/config.yaml`. See DEFENSE.md #1.
 
 - **Object store authentication** — SeaweedFS in `docker-compose.yml` runs
-  with no `-s3.config` identity file, so it accepts any access
-  key/secret pair (confirmed in CI, not assumed — see DEFENSE.md #12).
-  This is fine for a local dev/CI stack, deliberately not fine for
-  production: a real deployment would use IAM roles (or equivalent
-  workload identity) for the object store, not static keys checked
-  against nothing. Not deferred as a "todo" so much as: this repo never
-  intends to build its own credential/identity management for local
-  SeaweedFS — that problem is solved by the cloud provider once this
-  moves off Docker Compose.
+  with no `-s3.config` identity file baked in; `scripts/smoke_test.sh`
+  instead configures one real identity live at runtime, via `weed
+  shell`'s `s3.configure` (see DEFENSE.md #24). An earlier version of
+  this entry claimed SeaweedFS "accepts any access key/secret pair" with
+  no identity configured at all — that was wrong, and never actually
+  backed by a signed S3 write reaching it; corrected once DEFENSE.md #24
+  found the real behavior (it rejects every signed request outright with
+  no identity configured). This is still fine for a local dev/CI stack,
+  deliberately not fine for production: a real deployment would use IAM
+  roles (or equivalent workload identity) for the object store, not a
+  single static identity checked against a fixed key/secret pair. Not
+  deferred as a "todo" so much as: this repo never intends to build its
+  own credential/identity management for local SeaweedFS — that problem
+  is solved by the cloud provider once this moves off Docker Compose.
