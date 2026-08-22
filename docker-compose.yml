@@ -209,6 +209,13 @@ services:
     volumes:
       - flink-checkpoints:/tmp/flink-checkpoints
       - flink-savepoints:/tmp/flink-savepoints
+      # This mount REPLACES the image's entire /opt/flink/conf directory,
+      # not merges into it - including the image's own default
+      # log4j-console.properties. config/flink/ has to carry its own copy
+      # (see PROVENANCE.md), or log4j falls back to essentially no
+      # console output at all ("Reconfiguration failed: No configuration
+      # found..."), confirmed the hard way across several real CI runs
+      # before this was understood - see DEFENSE.md #26.
       - ./config/flink:/opt/flink/conf
       # Committed, reviewable SQL fixtures (see DEFENSE.md #10) - read-only
       # is fine here, unlike the conf mount above, since nothing needs to

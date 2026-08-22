@@ -779,3 +779,49 @@ ownership) already present in the image at a mount point gets copied
 into a freshly created volume on first mount - means this is enough; no
 entrypoint wrapper, no runtime chown, no change to `docker-compose.yml`
 at all.
+
+## 26. Flink's console logging has been silently broken since the conf mount was added
+
+Found on `exactly-once-validation` while trying (for the fifth time) to
+capture useful JobManager/TaskManager logs to diagnose an unrelated bug
+(a job reaching `FINISHED` with zero records read) - but the root cause
+lives here, on `main`, since before that branch existed.
+
+Every prior diagnostic attempt assumed detailed Flink logging existed
+*somewhere* and just hadn't been found yet. It didn't exist at all:
+`GET /jobmanager/logs` (Flink's own REST API) returned `{"logs":[]}`; a
+filesystem-wide `find` turned up nothing Flink-related, only OS
+package-manager logs; and the *entire* `docker compose logs` output for
+both containers across their whole lifetime - not a truncated tail,
+everything either container had ever printed - was two `Permission
+denied` lines (already known, DEFENSE.md #13), a "Starting X
+Manager"/"console application" pair, and two `main ERROR
+Reconfiguration failed: No configuration found for '<hash>' at 'null'
+in 'null'` lines. That last one is log4j2's own bootstrap-failure
+message - checked rather than dismissed as more noise.
+
+Root cause: `docker-compose.yml`'s `./config/flink:/opt/flink/conf`
+bind mount **replaces** the image's entire `conf/` directory rather
+than overlaying it. `config/flink/` has only ever contained
+`config.yaml` (added in DEFENSE.md #13) - meaning the image's own
+default `log4j-console.properties`, the file Flink's own logging docs
+name specifically for "Job-/TaskManagers run in the foreground" (exactly
+what "Starting standalonesession as a console application" describes),
+has been absent from both containers since that mount was first added.
+Log4j2 falls back to near-zero output instead of the INFO-level console
+logging (and rolling file appender) that file actually configures.
+
+**Why this was never caught on `main`:** nothing here has ever needed
+to read detailed Flink logs to debug a failure - `smoke_test.sh` steps
+4/5's own assertions (DEFENSE.md #14) check exit codes and sentinel
+markers in SQL output, never Flink's own log content. It took a bug
+that specifically required reading JobManager logs to notice logging
+itself was broken.
+
+Fixed with `config/flink/log4j-console.properties` - a verbatim,
+unmodified copy of Flink 2.1's own default file (`apache/flink`,
+`release-2.1` branch), not a from-scratch or partial reconstruction -
+so the bind mount carries a complete conf directory instead of a
+partial one. Recorded in PROVENANCE.md/THIRD_PARTY_NOTICES.md as
+copied from upstream Apache Flink (Apache-2.0), a new provenance
+category distinct from `reference/`.
