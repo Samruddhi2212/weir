@@ -1369,3 +1369,111 @@ with zero records read) - that still needs an actual run with real
 logging in place. This fix is a precondition for diagnosing it, not the
 diagnosis itself. Base-infrastructure scope, like DEFENSE.md #25/#30:
 ported to `main` in its own commit, not left stranded on this branch.
+
+## 33. Root cause: `eos_kafka_source` was never a Kafka table - it was a silently-created, empty Iceberg table
+
+The full diagnostic path, in order - what was ruled out, and how, before
+the actual cause was found. Recorded as its own entry because the path
+is the more valuable half of this: five real tooling gaps had to be
+found and fixed, in sequence, before the underlying bug was even
+*visible* to look at.
+
+**What was ruled out, with evidence, before any log was read:**
+
+1. `scan.bounded.mode` leaking in from `smoke_step4.sql`'s diagnostic
+   (E6's exact concern) - grepped every relevant file by line number;
+   zero occurrences in `exactly_once_job.sql` or `config/flink/
+   config.yaml`, and `sql-client.sh -f` has no shared-session mechanism
+   between separate invocations to leak through anyway.
+2. `execution.runtime-mode`/`scan.startup.mode` misconfigured - both
+   confirmed correct (`streaming`/`earliest-offset`), and independently
+   corroborated by the job's own REST API status reporting `job-type:
+   STREAMING` on every real run, not `BATCH`.
+3. Stale committed consumer-group offsets (`properties.group.id` is
+   fixed, `weir-eos-verify`, across runs) - ruled out because
+   `scan.startup.mode='earliest-offset'` ignores committed offsets
+   entirely regardless of group history; this would only matter under
+   `group-offsets` mode, which isn't used here.
+4. Topic/partition mismatch - checked the actual substituted SQL in two
+   real runs' captured output: `'topic' = 'weir-eos-events'` in both,
+   exactly matching the producer and the topic-creation stage. No
+   sentinel-substitution bug, correct partition count.
+5. An empty topic at the moment the source first read from it (#32) -
+   plausible, tested directly by reordering the script to start the
+   producer first, confirmed running for 3 seconds before job
+   submission. The job still finished in ~3s reading zero records. This
+   directly disproved the leading hypothesis rather than just failing to
+   confirm it.
+
+**Five diagnostic-tooling gaps, found and fixed in sequence, before the
+real evidence was ever visible (all under #31/#32's addenda):** a
+diagnostic `print_raw` silently swallowed into a variable instead of
+printed; a 180s-late log dump that captured three minutes of unrelated
+noise instead of the actual failure moment; capturing `docker compose
+logs` when the relevant logging was never going to be there regardless
+of timing; a guessed log-file path (`/opt/flink/log/*.log`) that didn't
+exist; and, once `find` and Flink's own `/jobmanager/logs` REST endpoint
+proved *no log files existed anywhere*, the actual root cause of *that*:
+`docker-compose.yml`'s conf bind mount had been silently discarding the
+image's own `log4j-console.properties` since the mount was first added
+(DEFENSE.md #13/#26/#32's sixth addendum) - a base-infrastructure bug
+that predates step 6 entirely and had simply never been noticed.
+
+**With real logging finally in place, the actual evidence:**
+
+```
+INFO org.apache.flink.runtime.source.coordinator.SourceCoordinator - Starting split enumerator for source Source: eos_kafka_source[1].
+INFO org.apache.iceberg.flink.source.enumerator.AbstractIcebergEnumerator - Received request split event from subtask 0
+INFO org.apache.iceberg.flink.source.enumerator.AbstractIcebergEnumerator - Assigning splits for 1 awaiting readers
+INFO org.apache.iceberg.flink.source.enumerator.AbstractIcebergEnumerator - No more splits available for subtask 0
+INFO org.apache.iceberg.flink.sink.IcebergFilesCommitter - Skip commit for checkpoint 1 due to no data files or delete files.
+```
+
+The class actually enumerating splits for `eos_kafka_source` is
+`org.apache.iceberg.flink.source.enumerator.AbstractIcebergEnumerator` -
+Iceberg's own read-side enumerator. Not one single log line from any
+real Kafka connector class (`org.apache.flink.connector.kafka.*`,
+`org.apache.kafka.*`) appears anywhere in either container's full log,
+despite `flink-sql-connector-kafka-4.0.1-2.0.jar` being confirmed on the
+classpath. `eos_kafka_source` was never wired to Kafka at all.
+
+Confirmed directly from Iceberg 1.11.0's own source
+(`FlinkCatalog.createTable()`, `flink/v2.0` module):
+
+```java
+if (Objects.equals(
+        table.getOptions().get(FlinkCreateTableOptions.CONNECTOR_PROPS_KEY),
+        FlinkDynamicTableFactory.FACTORY_IDENTIFIER)
+    && table.getOptions().get(FlinkCreateTableOptions.SRC_CATALOG_PROPS_KEY) == null) {
+  throw new IllegalArgumentException(
+      "Cannot create the table with 'connector'='iceberg' table property in an iceberg catalog...");
+}
+Preconditions.checkArgument(table instanceof ResolvedCatalogTable, "table should be resolved");
+createIcebergTable(tablePath, (ResolvedCatalogTable) table, ignoreIfExists);
+```
+
+This method special-cases exactly one value: `'connector'='iceberg'`
+(rejected outright, unless it's a `CREATE TABLE LIKE`). For every other
+value - `'kafka'` included - execution falls straight through to
+`createIcebergTable(...)`, unconditionally, silently discarding the
+connector property and every Kafka-specific option along with it.
+`exactly_once_job.sql` created `eos_kafka_source` *after* `USE CATALOG
+weir_eos_catalog` - while an Iceberg catalog was active. The table this
+created was a real, empty Iceberg table that happened to be named
+`eos_kafka_source`, not a Kafka source under any name. Reading it
+correctly, deterministically returns zero rows and completes
+immediately - not a bug in the read, a correct read of an empty table.
+
+**Why `smoke_step4.sql` never hit this:** it creates `smoke_kafka_source`
+under Flink's default catalog - no `CREATE CATALOG`/`USE CATALOG`
+statement anywhere in that file at all. The two scripts' Kafka tables
+were never created under the same conditions; step 4 was never at risk.
+
+**Fixed** by creating `eos_kafka_source` first, before the Iceberg
+catalog is created or switched to, and referencing it by its
+fully-qualified name (`default_catalog.default_database.
+eos_kafka_source`) in the final `INSERT` once the current catalog has
+moved to `weir_eos_catalog` - Flink SQL resolves cross-catalog
+references this way natively. `scan.topic-partition-discovery.interval`
+from #32 is kept as a real hardening measure, not reverted, even though
+it was never the actual mechanism.
