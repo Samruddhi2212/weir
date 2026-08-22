@@ -1318,3 +1318,54 @@ everything to console specifically for log-aggregation friendliness,
 which would mean the missing piece is *log level*, not log location -
 `docker compose logs`'s console output may simply be filtered below
 whatever level logs source/job completion).
+
+**Sixth addendum - found it, and it's not a script bug at all: the base
+infrastructure's logging has been broken since the conf mount was added
+(DEFENSE.md #13).** `GET /jobmanager/logs` returned `{"logs":[]}` -
+Flink's own accounting confirms zero log files exist, not a wrong
+search path. The filesystem-wide `find` turned up only OS package-
+manager logs (`/var/log/dpkg.log`, `apt/*.log`, ...), nothing Flink-
+related at all. And the *entire* `docker compose logs` output for both
+containers, across their whole lifetime (not a 200-line tail truncating
+something longer - this was everything either container had ever
+printed) was: two `config-parser-utils.sh: ... Permission denied` lines,
+a "Starting X Manager"/"Starting X as a console application" pair, and
+two `main ERROR Reconfiguration failed: No configuration found for
+'<hash>' at 'null' in 'null'` lines. That reconfiguration error is
+log4j2's own bootstrap failure message - a strong, checkable lead,
+followed up rather than dismissed as more noise.
+
+Root cause: `docker-compose.yml`'s `./config/flink:/opt/flink/conf` bind
+mount **replaces** the image's entire `conf/` directory rather than
+overlaying it - `config/flink/` has only ever contained `config.yaml`
+(added in DEFENSE.md #13), which means the image's own default
+`log4j-console.properties` - the file Flink's logging docs specifically
+name as the one used "if Job-/TaskManagers are run in the foreground"
+(exactly what "Starting standalonesession as a console application"
+describes) - has been absent from both containers since that mount was
+first added. Log4j2 falls back to essentially no meaningful output at
+all rather than the INFO-level console logging (and rolling file
+appender) that file configures. This has been true for every run since
+DEFENSE.md #13, including every smoke-test run on `main` - it never
+surfaced there only because nothing on `main` has ever needed to read
+detailed Flink logs to debug a failure; steps 4/5's own assertions
+(DEFENSE.md #14) never depended on log content.
+
+Fixed by adding `config/flink/log4j-console.properties` - a verbatim,
+unmodified copy of Flink 2.1's own default file (`apache/flink`,
+`release-2.1` branch, `flink-dist/src/main/flink-bin/conf/
+log4j-console.properties`), not a from-scratch or partial
+reconstruction - so the bind mount carries a complete, working conf
+directory instead of a partial one. Recorded in PROVENANCE.md/
+THIRD_PARTY_NOTICES.md as copied from upstream Apache Flink (Apache-2.0),
+a new provenance category distinct from `reference/`.
+
+**This explains why five consecutive diagnostic attempts found
+nothing** - not because each one looked in a slightly wrong place, but
+because the underlying logging was never actually configured to produce
+anything worth finding, in this container, since before step 6 existed.
+It does not yet explain the original bug (the job reaching `FINISHED`
+with zero records read) - that still needs an actual run with real
+logging in place. This fix is a precondition for diagnosing it, not the
+diagnosis itself. Base-infrastructure scope, like DEFENSE.md #25/#30:
+ported to `main` in its own commit, not left stranded on this branch.
