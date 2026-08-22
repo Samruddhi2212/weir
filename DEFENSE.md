@@ -1477,3 +1477,27 @@ moved to `weir_eos_catalog` - Flink SQL resolves cross-catalog
 references this way natively. `scan.topic-partition-discovery.interval`
 from #32 is kept as a real hardening measure, not reverted, even though
 it was never the actual mechanism.
+
+**Confirmed working, first real run with the fix:** checkpoints
+incremented correctly and continuously (0 -> 1 -> 2 -> 3, not stuck),
+the TaskManager kill/recovery cycle worked end to end (job state
+RUNNING -> RESTARTING -> RUNNING, checkpoints resuming from 3 through
+6), and stages 1 through 9 all passed. This is the actual exactly-once
+mechanism (DEFENSE.md #19) working, for the first time in this
+project, against a genuinely continuous Kafka source.
+
+**A second, unrelated bug surfaced immediately after, at stage 10:** the
+producer crashed with an uncaught `KafkaTimeoutError: Failed to update
+metadata after 60.0 secs`, raised synchronously from `producer.send()`
+itself (not from a delivery callback - a different failure mode
+`produce_events.py` had no handling for at all). This is exactly what
+CLAUDE.md's V6 exists for: a failure during the TaskManager-kill window
+(which stresses the whole stack under CI's limited resources, not just
+Flink) has to be distinguishable and survivable, not a crash that reads
+as an unrelated script failure. Fixed by catching `KafkaError` around
+the `send()` call specifically (separate from the existing delivery-
+callback error handling), logging it as a `send_failures` entry
+distinct from `delivery_failures`, and continuing the loop rather than
+exiting - the run still reports the failure (and still exits non-zero
+overall), but it no longer masks whatever else was happening in the
+same window.
