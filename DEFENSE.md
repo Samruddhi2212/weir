@@ -1301,3 +1301,20 @@ dump (this entry's first addendum), the wrong capture command entirely
 (second addendum), and now a wrong path for the right command. Fixed by
 not guessing a second path: `find /opt/flink -iname '*.log*'` discovers
 whatever's actually there instead of asserting where it should be.
+
+**Fifth addendum - `find /opt/flink` found nothing, not a missing
+directory: zero matches.** No log files exist under `/opt/flink` at
+all, in either container. Rather than narrow the search to a sixth
+guessed directory, widened it two ways at once: a filesystem-wide `find
+/ -xdev -iname '*.log*'`, and Flink's own REST API log listing
+(`GET /jobmanager/logs`) - confirmed as a real, documented endpoint
+against Flink's own REST API reference before use, returning JSON
+metadata (name/size/mtime) for whatever Flink itself considers its log
+files, independent of where the container happens to route them. Between
+the two, this should either surface the actual location or establish
+directly that Flink genuinely isn't writing log files in this setup at
+all (plausible: many container-oriented Flink configurations route
+everything to console specifically for log-aggregation friendliness,
+which would mean the missing piece is *log level*, not log location -
+`docker compose logs`'s console output may simply be filtered below
+whatever level logs source/job completion).

@@ -93,20 +93,27 @@ dump_logs_and_fail() {
   # `docker compose logs` only captures what a container prints to its
   # own stdout/stderr - Flink's standalonesession/taskexecutor entrypoint
   # runs "as a console application" for supervisory output only. That
-  # much is confirmed (DEFENSE.md #32, second addendum). Where the real
-  # job-lifecycle logging actually lands was NOT re-confirmed before
-  # guessing /opt/flink/log/*.log for the fix that preceded this one -
-  # that path doesn't exist in this image at all ("No such file or
-  # directory", per the run that used it). Not guessing a second path;
-  # `find` discovers whatever's actually there instead.
+  # much is confirmed (DEFENSE.md #32, second addendum). A subsequent fix
+  # guessed /opt/flink/log/*.log for the real logging and was wrong (no
+  # such path); the follow-up fix, `find /opt/flink -iname '*.log*'`,
+  # found nothing there either - zero matches, not a missing-path error.
+  # Two independent, broader methods this time, not a fifth single guess:
+  # a filesystem-wide search, and Flink's own REST API log listing, which
+  # reflects whatever Flink itself thinks it's logging regardless of
+  # where the container routes it.
   echo ""
-  echo "--- flink-jobmanager: find /opt/flink -iname '*.log*' ---"
-  docker compose exec -T flink-jobmanager sh -c "find /opt/flink -iname '*.log*' -exec echo '--- {} ---' \; -exec tail -n 300 {} \;" 2>&1
-  echo "--- end flink-jobmanager log files ---"
+  echo "--- flink-jobmanager: find / -iname '*.log*' (filesystem-wide) ---"
+  docker compose exec -T flink-jobmanager sh -c "find / -xdev -iname '*.log*' 2>/dev/null" 2>&1
+  echo "--- end filesystem-wide search ---"
   echo ""
-  echo "--- flink-taskmanager: find /opt/flink -iname '*.log*' ---"
-  docker compose exec -T flink-taskmanager sh -c "find /opt/flink -iname '*.log*' -exec echo '--- {} ---' \; -exec tail -n 300 {} \;" 2>&1
-  echo "--- end flink-taskmanager log files ---"
+  echo "--- flink-jobmanager REST API: GET /jobmanager/logs (listing, not content) ---"
+  curl -s --max-time 10 "http://localhost:${FLINK_UI_PORT}/jobmanager/logs" 2>&1
+  echo ""
+  echo "--- end /jobmanager/logs ---"
+  echo ""
+  echo "--- flink-taskmanager: find / -iname '*.log*' (filesystem-wide) ---"
+  docker compose exec -T flink-taskmanager sh -c "find / -xdev -iname '*.log*' 2>/dev/null" 2>&1
+  echo "--- end filesystem-wide search ---"
   fail "$msg"
 }
 
