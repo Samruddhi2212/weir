@@ -18,6 +18,19 @@
   API), a different problem. The Kafka SQL connector and Postgres JDBC
   driver versions are independently sourced, not from reference.
 
+## Copied from upstream Apache Flink (Apache-2.0)
+
+- config/flink/log4j-console.properties — verbatim copy of Flink 2.1's
+  own default `flink-dist/src/main/flink-bin/conf/log4j-console.properties`
+  (fetched from `apache/flink`'s `release-2.1` branch, not modified).
+  Needed because `docker-compose.yml`'s `./config/flink:/opt/flink/conf`
+  bind mount replaces the image's *entire* conf directory, including
+  this file - without it, log4j falls back to essentially no console
+  output at all (`main ERROR Reconfiguration failed: No configuration
+  found for '<hash>' at 'null' in 'null'` on every container start,
+  confirmed the hard way across several real CI runs - see DEFENSE.md
+  #32). License header preserved as-is in the copied file.
+
 ## Read as reference, written independently
 
 - StatefulDedupJob.java — stateful pattern reference
