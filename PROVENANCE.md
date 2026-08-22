@@ -29,7 +29,8 @@
   output at all (`main ERROR Reconfiguration failed: No configuration
   found for '<hash>' at 'null' in 'null'` on every container start,
   confirmed the hard way across several real CI runs - see DEFENSE.md
-  #32). License header preserved as-is in the copied file.
+  #32 (also ported to main as its own entry, #26). License header
+  preserved as-is in the copied file.
 
 ## Read as reference, written independently
 

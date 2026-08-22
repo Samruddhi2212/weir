@@ -83,3 +83,50 @@ P5. If a pasted instruction conflicts with CLAUDE.md or DEFENSE.md, stop
 
 (P1–P4 aren't recorded here — only P5 was given. If a fuller Process list
 exists, paste it and I'll fill the gap instead of guessing at it.)
+
+## Verification Standard (every script, every test)
+
+Distilled from this week's real bugs, not written speculatively — each
+one shipped, was caught, and is recorded in DEFENSE.md under its own
+number.
+
+- **V1.** Assertions compare exact parsed values. Never grep a pattern
+  against mixed output — we shipped a check matching `2` in jar version
+  strings that passed without verifying anything (DEFENSE.md #14).
+- **V2.** Every external command gets an explicit timeout. On timeout,
+  dump the relevant container logs before exiting non-zero.
+- **V3.** Print full raw output on success as well as failure. A
+  passing run whose output was never shown cannot be audited
+  retroactively.
+- **V4.** A result is real only after N clean consecutive runs. N=5 for
+  anything labeled a gate. One green run means nothing.
+- **V5.** Ground truth comes from the strongest available source. A
+  broker-confirmed delivery callback beats "we called `send()`."
+- **V6.** Failures and expected-failures must be distinguishable in
+  logs. A failed send during a kill test is not data loss and must not
+  read as a gap.
+
+## Design Before Code
+
+D1. For any non-trivial component, the DEFENSE.md entry explaining the
+    design and its rejected alternative is written BEFORE the
+    implementation. If the explanation can't be written, the code isn't
+    written yet.
+
+## Environment Gotchas (learned the hard way)
+
+- **E1.** Containers run as non-root (`USER flink`). Anything crossing
+  host->container must be world-readable or explicitly chowned. Prefer
+  committed, bind-mounted files over runtime-generated temp files.
+- **E2.** A mutable tag is not a pin. Digest-pin every image.
+- **E3.** Flink 2.x uses `config.yaml`, not `flink-conf.yaml`.
+- **E4.** Iceberg's Flink catalog factory requires Hadoop's
+  `Configuration` class unconditionally; shaded `hadoop-client-api`/
+  `-runtime` jars are required.
+- **E5.** A Flink source that completes immediately having read zero
+  records is a BOUNDED source, not a failing one. Check
+  `scan.bounded.mode`, `execution.runtime-mode`, and
+  `scan.startup.mode` before log-diving.
+- **E6.** Diagnostic settings leak. Anything added to isolate a bug
+  gets removed in the same session or explicitly recorded in
+  DEFENSE.md.

@@ -215,7 +215,8 @@ services:
       # (see PROVENANCE.md), or log4j falls back to essentially no
       # console output at all ("Reconfiguration failed: No configuration
       # found..."), confirmed the hard way across several real CI runs
-      # before this was understood - see DEFENSE.md #32.
+      # before this was understood - see DEFENSE.md #32 (also ported to
+      # main as its own entry, #26, since it's a base-infrastructure fix).
       - ./config/flink:/opt/flink/conf
       # Committed, reviewable SQL fixtures (see DEFENSE.md #10) - read-only
       # is fine here, unlike the conf mount above, since nothing needs to
