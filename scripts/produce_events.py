@@ -21,10 +21,12 @@ import threading
 import time
 
 from kafka import KafkaProducer
+from kafka.errors import KafkaError
 
 _stop_requested = threading.Event()
 _log_lock = threading.Lock()
 _delivery_failures = []
+_send_failures = []
 
 
 def _handle_stop_signal(signum, _frame):
@@ -94,11 +96,29 @@ def main():
                 break
             event_key = f"evt-{i:08d}"
             event_ts_ms = int(time.time() * 1000)
-            future = producer.send(args.topic, key=event_key, value={"event_key": event_key, "event_ts": event_ts_ms})
-            future.add_callback(
-                lambda md, k=event_key, ts=event_ts_ms: _on_success(args.emission_log, k, ts, md)
-            )
-            future.add_errback(lambda exc, k=event_key: _on_error(k, exc))
+            try:
+                future = producer.send(
+                    args.topic, key=event_key, value={"event_key": event_key, "event_ts": event_ts_ms}
+                )
+                future.add_callback(
+                    lambda md, k=event_key, ts=event_ts_ms: _on_success(args.emission_log, k, ts, md)
+                )
+                future.add_errback(lambda exc, k=event_key: _on_error(k, exc))
+            except KafkaError as exc:
+                # send() itself can raise synchronously (e.g.
+                # KafkaTimeoutError if metadata can't be fetched within
+                # max_block_ms) - a different failure mode than a
+                # delivery callback's async error, since the message was
+                # never even handed off for delivery. V6 (CLAUDE.md
+                # Verification Standard): distinguishable in logs, and
+                # survivable - a transient broker/metadata hiccup during
+                # the TaskManager-kill window (which stresses the whole
+                # stack, not just Flink) must not crash the producer and
+                # get misread as data loss. Recorded, then the loop
+                # continues rather than exiting.
+                print(f"produce_events.py: SEND FAILED for {event_key}: {exc}", file=sys.stderr)
+                with _log_lock:
+                    _send_failures.append({"event_key": event_key, "error": str(exc)})
             sent_count += 1
             i += 1
             if sleep_interval:
@@ -109,11 +129,15 @@ def main():
         producer.close(timeout=30)
 
     print(
-        f"produce_events.py: done. attempted={sent_count} delivery_failures={len(_delivery_failures)}",
+        f"produce_events.py: done. attempted={sent_count} "
+        f"delivery_failures={len(_delivery_failures)} send_failures={len(_send_failures)}",
         file=sys.stderr,
     )
     if _delivery_failures:
         print(json.dumps(_delivery_failures), file=sys.stderr)
+    if _send_failures:
+        print(json.dumps(_send_failures), file=sys.stderr)
+    if _delivery_failures or _send_failures:
         sys.exit(1)
     sys.exit(0)
 

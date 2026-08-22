@@ -414,7 +414,7 @@ wait "$PRODUCER_PID" 2>/dev/null
 PRODUCER_EXIT=$?
 PRODUCER_PID=""
 print_raw "producer log" "$(cat artifacts/eos_producer.log 2>/dev/null || true)"
-[ "$PRODUCER_EXIT" -eq 0 ] || fail "stage 10: producer exited $PRODUCER_EXIT (delivery failures reported above) - see artifacts/eos_producer.log"
+[ "$PRODUCER_EXIT" -eq 0 ] || fail "stage 10: producer exited $PRODUCER_EXIT (delivery or send failures reported above - see artifacts/eos_producer.log)"
 echo "PASS: stage 10 - producer stopped cleanly"
 
 # ------------------------------------------------------------
