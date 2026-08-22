@@ -15,6 +15,7 @@ import argparse
 import datetime
 import json
 import sys
+import threading
 import time
 
 import pyarrow.parquet as pq
@@ -45,15 +46,31 @@ def replay(rows, producer, topic, speed_factor, max_sleep, limit):
         rows = rows[:limit]
     if not rows:
         print("no rows to replay", file=sys.stderr)
-        return 0
+        return 0, 0
 
-    sent = 0
+    # V5 (CLAUDE.md Verification Standard): ground truth is the broker's
+    # own delivery confirmation, not "we called send()". `attempted`
+    # counts send() calls; `confirmed` counts only what the broker has
+    # actually acked via on_success - the two are reported separately,
+    # not conflated, so a partial-delivery run can't be misread as fully
+    # replayed. This script's first version only tracked `attempted` and
+    # called it "sent" - fixed here; produce_events.py (step 6) already
+    # did this correctly from the start.
+    attempted = 0
+    confirmed = 0
     delivery_failures = []
+    lock = threading.Lock()
     prev_pickup = None
+
+    def on_success(key, _metadata):
+        nonlocal confirmed
+        with lock:
+            confirmed += 1
 
     def on_error(key, exc):
         print(f"replay_producer.py: DELIVERY FAILED for {key}: {exc}", file=sys.stderr)
-        delivery_failures.append({"key": key, "error": str(exc)})
+        with lock:
+            delivery_failures.append({"key": key, "error": str(exc)})
 
     for i, row in enumerate(rows):
         pickup = row[PICKUP_COLUMN]
@@ -67,17 +84,21 @@ def replay(rows, producer, topic, speed_factor, max_sleep, limit):
         trip_key = f"tlc-yellow-{i:08d}"
         payload = {k: v for k, v in row.items()}
         future = producer.send(topic, key=trip_key.encode("utf-8"), value=payload)
+        future.add_callback(lambda md, k=trip_key: on_success(k, md))
         future.add_errback(lambda exc, k=trip_key: on_error(k, exc))
-        sent += 1
-        if sent % 1000 == 0:
-            print(f"replay_producer.py: sent {sent}/{len(rows)}", file=sys.stderr)
+        attempted += 1
+        if attempted % 1000 == 0:
+            print(f"replay_producer.py: attempted {attempted}/{len(rows)}", file=sys.stderr)
 
+    # flush() blocks until every buffered send's callback (success or
+    # error) has actually fired - `confirmed` is final and accurate only
+    # after this returns, not as soon as the loop above finishes queuing.
     producer.flush(timeout=60)
     if delivery_failures:
         print(f"replay_producer.py: {len(delivery_failures)} delivery failures", file=sys.stderr)
         print(json.dumps(delivery_failures), file=sys.stderr)
         raise SystemExit(1)
-    return sent
+    return attempted, confirmed
 
 
 def main():
@@ -102,11 +123,23 @@ def main():
         acks="all",
     )
     try:
-        sent = replay(rows, producer, args.topic, args.speed_factor, args.max_inter_arrival_sleep, args.limit)
+        attempted, confirmed = replay(
+            rows, producer, args.topic, args.speed_factor, args.max_inter_arrival_sleep, args.limit
+        )
     finally:
         producer.close(timeout=30)
 
-    print(f"replay_producer.py: done, sent {sent} trips to {args.topic}", file=sys.stderr)
+    print(
+        f"replay_producer.py: done - attempted {attempted}, broker-confirmed {confirmed} trips to {args.topic}",
+        file=sys.stderr,
+    )
+    if confirmed != attempted:
+        # Reached only if delivery_failures was somehow empty despite a
+        # count mismatch - shouldn't happen given flush() waits for every
+        # callback, but a silent mismatch here would be exactly the kind
+        # of unearned confidence V5 exists to rule out. Fail loudly
+        # rather than let a smaller number quietly look like success.
+        raise SystemExit(f"FAIL: attempted {attempted} but broker only confirmed {confirmed} - see stderr above")
 
 
 if __name__ == "__main__":

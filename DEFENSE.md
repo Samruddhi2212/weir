@@ -849,3 +849,21 @@ against yet.
 emission is deferred project-wide (CLAUDE.md rule 7, docs/FUTURE_WORK.md,
 README's "Lineage: declared, not runtime-emitted" section) - this
 component doesn't carve out an exception for itself.
+
+**V5 audit, after CLAUDE.md's Verification Standard landed - this
+component predated it and wasn't automatically compliant.** The first
+version of `replay_producer.py` incremented a `sent` counter immediately
+after calling `producer.send()`, registering only an error callback -
+"sent" meant "attempted," not "broker-confirmed," even though the
+variable name and the final log line ("done, sent N trips") read as if
+it meant the latter. `produce_events.py` (step 6, DEFENSE.md #25) never
+had this problem - it was built with the delivery-callback discipline
+from the start, since exactly-once validation makes ground truth the
+entire point. This component's own purpose (realistic seed/benchmark
+traffic, not exactly-once verification) doesn't need a persisted
+emission log the way step 6 does, but it still shouldn't misreport what
+"sent" means. Fixed by tracking `attempted` (send() calls) and
+`confirmed` (successful on_success callbacks) as two separate counters,
+reporting both, and failing loudly if they don't match after `flush()` -
+rather than trusting a count that was never actually checked against the
+broker's own acknowledgment.
