@@ -1269,3 +1269,21 @@ lifecycle - not a new guess, the specific gap this addendum identifies.
 This is deliberately being set aside now to start Part 2.1 (NYC TLC
 downloader + replay producer, which only needs Kafka, already green) in
 parallel, per explicit instruction not to block on this.
+
+**Third addendum - re-audited before resuming, per E5/E6.** Explicitly
+re-checked whether `scan.bounded.mode` could have leaked in from
+`smoke_step4.sql`'s diagnostic (the exact bug class E6 warns about): it
+doesn't appear anywhere in `exactly_once_job.sql`, only in the separate
+`smoke_step4.sql`, and `sql-client.sh -f` takes no `--init`/shared-
+session file - each invocation is a fresh process with no mechanism to
+inherit settings from a different file's separate invocation. No leak.
+`execution.runtime-mode=streaming` and `scan.startup.mode=earliest-
+offset` are both present and correct; the job's own REST API status has
+independently confirmed `job-type: STREAMING` on every real run. The
+bounded-completion *signature* (E5) is still exactly right as a
+diagnosis - it's just not caused by a stray config value sitting in a
+file. `dump_logs_and_fail` is fixed (this commit) to read `/opt/flink/
+log/*.log` directly instead of `docker compose logs`, which two
+consecutive runs proved only shows console startup banners, never
+Flink's actual job-lifecycle logging. Next real run gets the actual
+evidence needed to diagnose from, not another guess.

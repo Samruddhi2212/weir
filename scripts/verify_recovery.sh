@@ -90,6 +90,23 @@ dump_logs_and_fail() {
   echo "--- container logs (flink-jobmanager, flink-taskmanager), tail 200 ---"
   docker compose logs --tail=200 flink-jobmanager flink-taskmanager 2>&1
   echo "--- end container logs ---"
+  # `docker compose logs` only captures what a container prints to its
+  # own stdout/stderr - Flink's standalonesession/taskexecutor entrypoint
+  # runs "as a console application" for supervisory output only. Actual
+  # job-lifecycle/source logging (INFO level, where a source completing
+  # would be logged) goes to /opt/flink/log/*.log INSIDE the container,
+  # never touching stdout - confirmed the hard way, twice: the dump
+  # above showed nothing but startup banners in two consecutive real
+  # runs regardless of how quickly it fired afterward (DEFENSE.md #32,
+  # second addendum). Read directly instead.
+  echo ""
+  echo "--- flink-jobmanager /opt/flink/log/*.log, tail 300 each ---"
+  docker compose exec -T flink-jobmanager sh -c 'tail -n 300 /opt/flink/log/*.log' 2>&1
+  echo "--- end flink-jobmanager log files ---"
+  echo ""
+  echo "--- flink-taskmanager /opt/flink/log/*.log, tail 300 each ---"
+  docker compose exec -T flink-taskmanager sh -c 'tail -n 300 /opt/flink/log/*.log' 2>&1
+  echo "--- end flink-taskmanager log files ---"
   fail "$msg"
 }
 
