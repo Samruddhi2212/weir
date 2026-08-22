@@ -92,20 +92,20 @@ dump_logs_and_fail() {
   echo "--- end container logs ---"
   # `docker compose logs` only captures what a container prints to its
   # own stdout/stderr - Flink's standalonesession/taskexecutor entrypoint
-  # runs "as a console application" for supervisory output only. Actual
-  # job-lifecycle/source logging (INFO level, where a source completing
-  # would be logged) goes to /opt/flink/log/*.log INSIDE the container,
-  # never touching stdout - confirmed the hard way, twice: the dump
-  # above showed nothing but startup banners in two consecutive real
-  # runs regardless of how quickly it fired afterward (DEFENSE.md #32,
-  # second addendum). Read directly instead.
+  # runs "as a console application" for supervisory output only. That
+  # much is confirmed (DEFENSE.md #32, second addendum). Where the real
+  # job-lifecycle logging actually lands was NOT re-confirmed before
+  # guessing /opt/flink/log/*.log for the fix that preceded this one -
+  # that path doesn't exist in this image at all ("No such file or
+  # directory", per the run that used it). Not guessing a second path;
+  # `find` discovers whatever's actually there instead.
   echo ""
-  echo "--- flink-jobmanager /opt/flink/log/*.log, tail 300 each ---"
-  docker compose exec -T flink-jobmanager sh -c 'tail -n 300 /opt/flink/log/*.log' 2>&1
+  echo "--- flink-jobmanager: find /opt/flink -iname '*.log*' ---"
+  docker compose exec -T flink-jobmanager sh -c "find /opt/flink -iname '*.log*' -exec echo '--- {} ---' \; -exec tail -n 300 {} \;" 2>&1
   echo "--- end flink-jobmanager log files ---"
   echo ""
-  echo "--- flink-taskmanager /opt/flink/log/*.log, tail 300 each ---"
-  docker compose exec -T flink-taskmanager sh -c 'tail -n 300 /opt/flink/log/*.log' 2>&1
+  echo "--- flink-taskmanager: find /opt/flink -iname '*.log*' ---"
+  docker compose exec -T flink-taskmanager sh -c "find /opt/flink -iname '*.log*' -exec echo '--- {} ---' \; -exec tail -n 300 {} \;" 2>&1
   echo "--- end flink-taskmanager log files ---"
   fail "$msg"
 }

@@ -1287,3 +1287,17 @@ log/*.log` directly instead of `docker compose logs`, which two
 consecutive runs proved only shows console startup banners, never
 Flink's actual job-lifecycle logging. Next real run gets the actual
 evidence needed to diagnose from, not another guess.
+
+**Fourth addendum - the fixed path was itself another unverified guess,
+and it was wrong.** The next real run: `tail: cannot open '/opt/flink/
+log/*.log' for reading: No such file or directory`, from both
+containers. `/opt/flink/log/*.log` was written down as "the" Flink log
+location from general knowledge, not confirmed against this specific
+image - the exact mistake E6 exists to name, made while writing the fix
+for a *different* instance of the same mistake. Four consecutive real
+runs have now each cost a full CI cycle to a diagnostic gap rather than
+the underlying question: a swallowed print (#31), a 175-second-late
+dump (this entry's first addendum), the wrong capture command entirely
+(second addendum), and now a wrong path for the right command. Fixed by
+not guessing a second path: `find /opt/flink -iname '*.log*'` discovers
+whatever's actually there instead of asserting where it should be.
