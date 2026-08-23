@@ -130,3 +130,15 @@ D1. For any non-trivial component, the DEFENSE.md entry explaining the
 - **E6.** Diagnostic settings leak. Anything added to isolate a bug
   gets removed in the same session or explicitly recorded in
   DEFENSE.md.
+- **E7.** Mounting a config directory into the Flink container
+  *replaces* the image's own conf directory - it does not merge with
+  it. This silently discarded the image's default
+  `log4j-console.properties` (near-total loss of console logging) and
+  its default `env.java.opts.all` (Java 17+/21 `--add-opens`/
+  `--add-exports` flags, without which Kryo's reflection-based
+  checkpoint serialization throws `InaccessibleObjectException`) - two
+  separate real outages from the same cause. Any config file mounted
+  this way must carry forward everything the image's own default
+  provided, not just the keys this project cares about, and that has
+  to be verified explicitly (diff against the image's own default file,
+  don't assume a hand-written file is complete).
