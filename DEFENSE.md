@@ -1687,3 +1687,187 @@ neither had been exercised together with the smoke test path before.
 Per CLAUDE.md's V4, ran `scripts/smoke_test.sh` via CI 5 times on the
 merged `main`, not just once: 5/5 pass. The two changes compose
 correctly; nothing about combining them broke steps 2-5.
+
+## 38. Part 2.1: NYC TLC downloader and time-compressed replay producer
+
+Written before any of this code, per the standing rule reaffirmed this
+session: the explanation comes first, or the code doesn't get written.
+This work only needs Kafka, already green - deliberately started while
+the `exactly-once-validation` branch's own bug (DEFENSE.md #32) stays
+parked and unresolved rather than blocking on it.
+
+**Dataset scope.** Yellow Taxi trip records only, not green/FHV/HVFHV -
+the most standard, widely-referenced TLC dataset, and one dataset is
+enough to validate the download-and-replay mechanism itself. Default
+month `2025-01` (real file, confirmed reachable: `curl -I` against
+`https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2025-01.parquet`
+returned `200 OK`, `Content-Length: 59158238`), overridable via
+`--year-month` - not hardcoded as the *only* option, since TLC publishes
+monthly and a real benchmark run will eventually want more than one
+month's data.
+
+**Download mechanism: Python's stdlib `urllib`, not `requests`.** Not
+asked as a dependency question because it doesn't need to be one - a
+streamed HTTP GET with a status check is well within what `urllib`
+handles directly, and `requests` would be a second HTTP client library
+in a project that has had zero need for one until now. `pyarrow` (asked
+about, approved) is the only new dependency this component adds.
+
+**Trip identity: synthetic, not a TLC-provided field.** The Yellow Taxi
+schema has no natural per-trip unique key - confirmed by reading each
+downloaded file's own embedded Parquet schema at runtime rather than
+assuming a fixed, hardcoded column list (TLC's schema has changed
+slightly release to release; reading the file's actual schema and
+failing loudly if an expected column - `tpep_pickup_datetime` - is
+missing is more robust than trusting a column list written down once).
+The replay producer generates a key from the row's ordinal position in
+the sorted-by-pickup-time sequence (`tlc-yellow-2025-01-000001`, ...) -
+stable and unique for a single file, sufficient for what this component
+does (produce realistic-shaped traffic), not intended as a durable
+cross-run trip identifier.
+
+**Time compression.** Sorted by `tpep_pickup_datetime` ascending, then
+replayed with the wall-clock gap between consecutive sends equal to the
+real inter-arrival delta divided by `--speed-factor` (default `3600`:
+one real hour of trip arrivals compressed into one replayed second) -
+preserving the *shape* of the arrival pattern (rush-hour bursts, overnight
+lulls) rather than a flat, unrealistic constant rate. Capped at
+`--max-inter-arrival-sleep` (default `5` seconds): a real gap in the data
+(an overnight lull, a data quality hole) divided by 3600 could still be
+a multi-minute wait uncompressed further, and this is a replay tool, not
+a faithful real-time simulator - the cap is a deliberate, stated
+tradeoff, not an unexamined shortcut.
+
+**Zone IDs left unresolved.** `PULocationID`/`DOLocationID` are passed
+through as TLC's own integer zone IDs, not joined against TLC's separate
+`taxi_zone_lookup.csv` to resolve human-readable borough/zone names.
+Resolving them is a real, addable enhancement, not attempted here - it's
+a second dataset and a join this component doesn't need to prove out the
+download-and-replay mechanism itself.
+
+**Producer library: `kafka-python`, reusing DEFENSE.md #25's decision,
+not a fresh dependency question.** Same delivery-confirmed-callback
+reasoning applies, though this component doesn't need step 6's emission
+log specifically - it's producing realistic seed/benchmark traffic, not
+validating exactly-once semantics, so a delivery failure is logged and
+raised, not written to a ground-truth file nothing downstream compares
+against yet.
+
+**Runtime lineage:** not emitted by this producer. Runtime lineage
+emission is deferred project-wide (CLAUDE.md rule 7, docs/FUTURE_WORK.md,
+README's "Lineage: declared, not runtime-emitted" section) - this
+component doesn't carve out an exception for itself.
+
+**V5 audit, after CLAUDE.md's Verification Standard landed - this
+component predated it and wasn't automatically compliant.** The first
+version of `replay_producer.py` incremented a `sent` counter immediately
+after calling `producer.send()`, registering only an error callback -
+"sent" meant "attempted," not "broker-confirmed," even though the
+variable name and the final log line ("done, sent N trips") read as if
+it meant the latter. `produce_events.py` (step 6, DEFENSE.md #25) never
+had this problem - it was built with the delivery-callback discipline
+from the start, since exactly-once validation makes ground truth the
+entire point. This component's own purpose (realistic seed/benchmark
+traffic, not exactly-once verification) doesn't need a persisted
+emission log the way step 6 does, but it still shouldn't misreport what
+"sent" means. Fixed by tracking `attempted` (send() calls) and
+`confirmed` (successful on_success callbacks) as two separate counters,
+reporting both, and failing loudly if they don't match after `flush()` -
+rather than trusting a count that was never actually checked against the
+broker's own acknowledgment.
+
+## 39. Part 2.1 completion: wiring the replay producer to live Kafka and verifying it for real
+
+Written before any of this code, per the standing rule. Four things
+need proving, not assuming: timestamps survive the round trip, the
+compression ratio is what it claims to be, resuming from an event-time
+offset is gap-free and duplicate-free at the seam, and (re-audited,
+this time against the actual current file rather than assumed) whether
+V5 still holds after this session's earlier fix.
+
+**V5 re-audit, this time - result: compliant, not a violation.**
+Re-read `replay_producer.py` line by line against V5 rather than
+trusting the earlier fix (DEFENSE.md #38's V5 audit) blindly.
+`confirmed` increments only inside `on_success`, which only fires from
+a delivery callback; the `attempted % 1000` progress line and the final
+summary both say "attempted", never "sent", for the send-call count
+specifically; and `main()` still hard-fails if `confirmed != attempted`
+after `flush()`. No send-call-as-truth logging found anywhere in the
+current file. Confirmed compliant, not assumed.
+
+**Emission log: reversing #38's own "doesn't need one" call.** #38
+reasoned this component didn't need step 6's persisted emission log
+since it isn't validating exactly-once semantics. That reasoning held
+for its original scope; it doesn't hold for verifying timestamp
+integrity or a resume seam, both of which need a trustworthy record of
+*which* rows were confirmed-sent and *what timestamp* each one carried,
+across two separate process invocations for the resume case
+specifically. Adding `--emission-log` (optional, off by default),
+writing exactly what `produce_events.py` already writes on confirmed
+delivery - not new design, reuse of an already-proven pattern once the
+actual need for it showed up.
+
+**Resume seam: verified the sort's determinism before designing around
+it, not assumed.** A tie-safe resume (`--resume-after-timestamp T
+--resume-skip-ties K`: skip every row with `pickup < T`, then skip the
+first `K` rows with `pickup == T`) is only gap-free and duplicate-free
+across two separate runs if the *same* input file sorted the *same* way
+produces the *same* row order for tied timestamps every time - taxi
+pickup times are recorded to the second, and dense periods genuinely
+have multiple trips per second, so ties at an arbitrary resume boundary
+are a real scenario, not a hypothetical. Checked before relying on it:
+`pyarrow.Table.sort_by()` is documented as a stable sort (ties keep
+their original relative order), and `pq.read_table()` on the same file
+always reads rows in the same on-disk physical order - stable sort of a
+deterministic input order is deterministic output order, ties included,
+across separate process invocations. No compound tie-breaking sort key
+needed; the existing `sort_by(PICKUP_COLUMN)` is already safe for this,
+confirmed rather than assumed.
+
+**Time-compression ratio test: isolated from the cap on purpose, not
+by accident.** `--max-inter-arrival-sleep` caps any single gap's
+replayed delay (DEFENSE.md #38) - correct production behavior, but it
+would corrupt a naive `event_time_span / wall_clock_elapsed ≈
+speed_factor` check if any gap in the tested sample actually hit the
+cap, since a capped gap contributes less wall-clock time than the ratio
+predicts. Rather than reimplementing the capped-sum formula a second
+time inside the test (a redundant parallel implementation that could
+itself be wrong, testing itself more than the system), the verification
+run uses a deliberately large `--max-inter-arrival-sleep` (effectively
+disabling the cap for this one run) so the simple ratio check is
+exactly correct for what it's checking, with the cap's own behavior
+untested here on purpose - that's a different property, already
+covered by #38's own reasoning for why the cap exists at all.
+
+**Wall-clock ground truth: the broker's own message timestamps, not the
+producer's.** Same V5 principle applied to a new measurement: elapsed
+wall-clock time for the ratio check is computed from the *consumed*
+messages' broker-assigned timestamps (`ConsumerRecord.timestamp`, when
+Kafka actually received each message), not from timers inside
+`replay_producer.py` itself. The producer's own clock is exactly what's
+under test here - measuring it with itself would be circular.
+
+**Live-Kafka wiring: Kafka only, no Flink/Iceberg.** This work has only
+ever needed Kafka (DEFENSE.md #38's own framing) - the verification
+workflow brings up `docker compose up -d kafka` alone, not the full
+stack, keeping this test fast and free of dependencies step 6 already
+covers elsewhere.
+
+**Caught before shipping, not in a real CI run:** the workflow's first
+draft waited for Kafka to become healthy via `docker compose ps kafka
+--format '{{.Health}}'` - checked against `docker compose ps`'s own
+documentation before trusting it, which only supports `pretty` (the
+default) or `json` as `--format` values, not an arbitrary Go-template
+field. Fixed by reusing `smoke_test.sh`'s already-proven pattern (grep
+the plain-text output for this service's line and the literal
+`(healthy)` substring) instead of inventing a second, unverified one.
+
+**Verified 5/5, not trusted on one pass - per CLAUDE.md V4.** All three
+checks passed clean on the first real run, then re-run four more times
+via `gh run rerun`: 5/5. Real measured numbers, not illustrative: 500/500
+landed timestamps exactly matched source data on every run; the
+compression-ratio check measured `actual_ratio=59.96` against a
+configured `speed_factor=60.0` (0.1% relative error, well inside the
+25% tolerance) on the first run, similarly tight on the others; the
+resume-seam check landed exactly 500/500 in each half with zero overlap
+and zero gaps every time. Part 2.1 is genuinely done, not just built.
