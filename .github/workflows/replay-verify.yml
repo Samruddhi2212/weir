@@ -1,0 +1,75 @@
+name: NYC TLC Replay Verification
+
+# Manual trigger only. Not destructive (unlike exactly-once.yml), but
+# downloads a real ~59MB dataset and runs three separate Kafka round
+# trips - too slow for the normal per-push gate ci.yml runs, and per
+# CLAUDE.md V4 this is meant to be dispatched repeatedly (5x) rather
+# than trusted on one pass, matching how step 6 was actually verified.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  verify:
+    name: Replay producer - timestamps, compression ratio, resume seam
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pyarrow and kafka-python
+        # Versions match what's already pinned/approved elsewhere in
+        # this project - pyarrow for reading TLC's Parquet files
+        # (DEFENSE.md #38), kafka-python for delivery-confirmed
+        # producing (DEFENSE.md #25/#38).
+        run: pip install pyarrow kafka-python==3.0.11
+      - name: Start Kafka only
+        # This work has only ever needed Kafka (DEFENSE.md #38/#39) -
+        # not the full stack step 6 needs.
+        run: docker compose up -d kafka
+      - name: Wait for Kafka healthy
+        # `docker compose ps --format` only supports `pretty` (default)
+        # or `json`, not a Go-template field like `{{.Health}}` - not
+        # guessed, checked against docker/compose's own docs before
+        # using it. Reusing scripts/smoke_test.sh's already-proven
+        # pattern instead: grep the plain-text output for this
+        # service's line and the literal "(healthy)" substring.
+        run: |
+          for i in $(seq 1 30); do
+            line="$(docker compose ps | grep '^weir-kafka[[:space:]]' || true)"
+            if [ -n "$line" ] && echo "$line" | grep -q "(healthy)"; then
+              echo "kafka is healthy"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "kafka never became healthy"
+          docker compose logs kafka
+          exit 1
+      - name: Download NYC TLC Yellow Taxi data (2025-01)
+        run: python ingestion/replay/download_tlc_data.py --year-month 2025-01 --output-dir data/tlc
+      - name: Verify timestamps intact
+        run: |
+          python ingestion/replay/verify_replay.py \
+            --bootstrap-server localhost:${KAFKA_EXTERNAL_PORT:-29092} \
+            --input data/tlc/yellow_tripdata_2025-01.parquet \
+            timestamps --limit 500
+      - name: Verify time-compression ratio
+        run: |
+          python ingestion/replay/verify_replay.py \
+            --bootstrap-server localhost:${KAFKA_EXTERNAL_PORT:-29092} \
+            --input data/tlc/yellow_tripdata_2025-01.parquet \
+            ratio --limit 1000 --speed-factor 60 --tolerance 0.25
+      - name: Verify resume-from-event-time-offset seam
+        run: |
+          python ingestion/replay/verify_replay.py \
+            --bootstrap-server localhost:${KAFKA_EXTERNAL_PORT:-29092} \
+            --input data/tlc/yellow_tripdata_2025-01.parquet \
+            resume-seam --run1-limit 500 --run2-limit 500
+      - name: Show Kafka logs on failure
+        if: failure()
+        run: docker compose logs kafka
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
