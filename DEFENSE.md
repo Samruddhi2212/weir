@@ -825,3 +825,30 @@ so the bind mount carries a complete conf directory instead of a
 partial one. Recorded in PROVENANCE.md/THIRD_PARTY_NOTICES.md as
 copied from upstream Apache Flink (Apache-2.0), a new provenance
 category distinct from `reference/`.
+
+## 27. Kafka's advertised listener was never reachable from a host-side client
+
+Found on `exactly-once-validation` (see that branch's DEFENSE.md #34)
+while building step 6's producer, `scripts/produce_events.py` - the
+first client in this project to connect to Kafka from the *host*
+rather than via `docker compose exec`. Ported here since any future
+host-side Kafka client (`ingestion/replay/replay_producer.py` on
+`nyc-tlc-replay`, for one, already needs this) would hit the identical
+problem.
+
+`docker-compose.yml`'s `kafka` service had exactly one data listener,
+advertised as `kafka:9092` - a hostname that only resolves inside the
+`weir-network` Docker network. A host-side client's initial bootstrap
+connection can succeed (the port is genuinely reachable via Docker's
+port mapping), but any metadata-driven reconnect - needed for real
+produce/consume traffic, not just the first handshake - tries to reach
+`kafka:9092` and fails outright from outside the network.
+
+Fixed with the standard Kafka Docker dual-listener pattern: a second
+listener, `EXTERNAL`, on its own port (`29092`, `KAFKA_EXTERNAL_PORT`),
+advertised as `localhost:${KAFKA_EXTERNAL_PORT}`. The existing
+`PLAINTEXT` listener, its port, and its `kafka:9092` advertised address
+are unchanged - every in-network client (Flink's Kafka SQL connector,
+`smoke_test.sh`'s `docker compose exec` calls) keeps using it exactly
+as before. No single listener can serve both audiences; two listeners
+is the actual fix, not a workaround around one.
