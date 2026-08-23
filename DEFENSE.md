@@ -1555,3 +1555,56 @@ never one a host-side client can, and vice versa - two listeners are the
 actual fix, not a workaround around a single one. `produce_events.py`'s
 invocation in `scripts/verify_recovery.sh` now points at
 `KAFKA_EXTERNAL_PORT` instead of `KAFKA_PORT`.
+
+## 35. Java 21's module system blocks Kryo's checkpoint serialization - and it's the same root cause as the log4j bug (#26/#32)
+
+With #34's listener fix in place, the next real run got dramatically
+further: `read-records: 7531` on the source vertex - genuine Kafka data,
+finally, confirming #33's catalog fix works end to end - but then failed
+repeatedly at checkpointing, restarted three times (`fixed-delay.
+attempts: 3`), and reached `FAILED`.
+
+```
+java.lang.Exception: Could not perform checkpoint 4 for operator Source: eos_kafka_source[1] -> IcebergStreamWriter (2/2)#3.
+Caused by: com.esotericsoftware.kryo.KryoException: java.lang.reflect.InaccessibleObjectException: Unable to make field final byte[] java.nio.ByteBuffer.hb accessible: module java.base does not "opens java.nio" to unnamed module @51931956
+```
+
+Kryo (Flink's fallback serializer for state types without a dedicated
+native serializer) uses reflection to access private/final JDK fields -
+here, `java.nio.ByteBuffer`'s internal `hb` array, needed to serialize
+some part of the Kafka source's split/offset state for checkpointing.
+Since Java 17, the JDK's module system enforces "strong encapsulation"
+of `java.base` internals by default; without an explicit `--add-opens`
+JVM flag for the specific package, this kind of reflective access
+throws rather than warns. This project's Flink image is pinned to
+`flink:2.1.0-java21` - well past that threshold.
+
+Checked before assuming a from-scratch fix was needed: Flink's own
+stock `config.yaml` (`apache/flink`, `release-2.1` branch,
+`flink-dist/src/main/resources/config.yaml`) ships exactly this,
+labelled "required for Java 17 support":
+
+```yaml
+env:
+  java:
+    opts:
+      all: --add-exports=... --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.text=ALL-UNNAMED --add-opens=java.base/java.time=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED
+```
+
+`--add-opens=java.base/java.nio=ALL-UNNAMED` is right there in Flink's
+own default. This is the exact same root cause as #26/#32's sixth
+addendum: `docker-compose.yml`'s `./config/flink:/opt/flink/conf` bind
+mount **replaces** the image's entire conf directory, and
+`config/flink/config.yaml` - adapted from `reference/`'s pre-2.1,
+pre-Java21 `flink-conf.yaml` (PROVENANCE.md) - never carried these
+Java-17+-support defaults forward, because the file it was adapted from
+predates the Java version where they'd have mattered. The log4j bug and
+this one are the same class of mistake, found twice: a committed config
+file that unintentionally *replaces* upstream defaults instead of
+*extending* them, discovered only once something that needed the
+missing piece actually ran.
+
+**Fixed** by adding the identical `env.java.opts.all` block to
+`config/flink/config.yaml`, copied verbatim from Flink 2.1's own
+default (same source and verbatim-copy discipline as #26's
+`log4j-console.properties`) - not reconstructed or abbreviated.
