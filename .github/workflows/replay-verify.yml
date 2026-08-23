@@ -67,6 +67,24 @@ jobs:
             --bootstrap-server localhost:${KAFKA_EXTERNAL_PORT:-29092} \
             --input data/tlc/yellow_tripdata_2025-01.parquet \
             resume-seam --run1-limit 500 --run2-limit 500
+      - name: Measure lateness distribution (Part 2.2)
+        # A measurement, not a pass/fail assertion (see DEFENSE.md #40) -
+        # reuses this same job's already-provisioned Kafka and already-
+        # downloaded dataset rather than a separate workflow duplicating
+        # that setup.
+        run: |
+          mkdir -p artifacts
+          python scripts/measure_lateness.py \
+            --bootstrap-server localhost:${KAFKA_EXTERNAL_PORT:-29092} \
+            --input data/tlc/yellow_tripdata_2025-01.parquet \
+            --limit 2000 --shuffle-window 50 --report-json artifacts/lateness_report.json
+      - name: Upload lateness report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lateness-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/lateness_report.json
+          if-no-files-found: warn
       - name: Show Kafka logs on failure
         if: failure()
         run: docker compose logs kafka

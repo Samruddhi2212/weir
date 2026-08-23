@@ -1871,3 +1871,77 @@ configured `speed_factor=60.0` (0.1% relative error, well inside the
 25% tolerance) on the first run, similarly tight on the others; the
 resume-seam check landed exactly 500/500 in each half with zero overlap
 and zero gaps every time. Part 2.1 is genuinely done, not just built.
+
+## 40. Part 2.2: measuring real lateness, and why the naive replay can't produce any
+
+Written before `scripts/measure_lateness.py` or the shuffle feature it
+depends on, per D1. The question this has to answer isn't "does the
+code run" - it's "is the number it produces actually a lateness
+distribution, or an artifact of how the test was built."
+
+**Why naive replay measures nothing.** The source Parquet is sorted by
+`tpep_pickup_datetime`, and `replay_producer.py` sends in that exact
+order - every event's arrival relative order matches its event-time
+order perfectly, by construction. Measuring "lateness" against that
+replay would report ~0 for everything, correctly reflecting the test
+setup and telling us nothing about how a watermark should actually be
+tuned for disorder that hasn't been reproduced yet.
+
+**Out-of-order model: bounded window shuffle (your choice from the
+three options presented).** Partition the chronologically-sorted rows
+into fixed, non-overlapping windows of size `--shuffle-window W`, and
+shuffle *only the send order* within each window - `event_ts` itself is
+never touched, only which row goes out at which position. Deterministic
+worst case by construction: an event can never actually be more than
+`W-1` positions out of true order, so the resulting lateness
+distribution has a hard ceiling implied directly by `W`, not an
+open-ended tail. That's the tradeoff already named when this model was
+chosen over the other two: clean and parameterized, at the cost of a
+uniform-ish shape within the bound rather than a realistic long tail.
+Reproducible by default via a fixed `--shuffle-seed` (documented, not
+hidden) - a measurement meant to justify a real config change has to be
+re-derivable, not a one-off random result nobody can reproduce.
+
+**Pacing stays tied to true chronological order, not shuffled order.**
+Each row's own wall-clock sleep (the existing `min(delta/speed_factor,
+max_sleep)` formula, DEFENSE.md #38) is computed from its real
+chronological predecessor's timestamp, *before* the window shuffle is
+applied to decide send order. Windows are non-overlapping and shuffling
+only permutes within one, so the sum of sleeps per window - and
+therefore total replay duration and the compression ratio verified in
+#39 - is unchanged by turning shuffling on. Only the local arrival
+order moves; the overall pacing envelope doesn't.
+
+**Lateness definition: running-max-based, not wall-clock/broker-
+timestamp-based.** For each event, in the order it actually arrives:
+`lateness = (running_max_event_time_seen_so_far - this_event's_event_ts)`,
+then update the running max. This is the standard operational
+definition streaming watermarks are actually tuned against - "how far
+behind the newest timestamp seen so far is this one" - not how it
+compares to some external wall clock. Broker/consume timestamps are
+deliberately not used here (unlike DEFENSE.md #39's ratio test, where
+they were the right ground truth for a different question): the
+disorder under test is the *synthetic shuffle*, and measuring against
+real infra timing would conflate that with unrelated network/consumer
+jitter, muddying the one thing this measurement exists to characterize.
+
+**Percentiles: Python's stdlib, no new dependency.**
+`statistics.quantiles()` (3.8+) computes p50/p95/p99/p999 and the
+histogram bucketing directly - `numpy`/`scipy` were not needed and
+weren't asked about as a result.
+
+**Watermark bound proposal: p99 as the default recommendation, stated
+with its actual drop rate, not treated as a settled choice.** The
+script reports the full distribution (all percentiles, max) and
+recommends bounding at p99 specifically because it's the standard
+starting point for "cover the overwhelming majority, treat the
+remainder as a real, acknowledged tradeoff" - not p999 (excellent
+coverage, but on a `--shuffle-window`-bounded distribution the tail
+between p99 and p999 is compressed anyway, so the latency cost of
+chasing it further is real while the coverage gain is small) and not
+p50/p95 (cheap in latency, but a materially larger drop rate on a
+distribution this bounded). The *reported* drop-rate-at-p99 is the
+actual number to make the call from, not the recommendation by itself
+- this project's own rule (CLAUDE.md hard rule 1) is that no fabricated
+number substitutes for a measured one, and that applies exactly as much
+to this recommendation as to anything benchmarks/ produces.
