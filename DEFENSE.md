@@ -1655,3 +1655,26 @@ discipline as DEFENSE.md #14 (a check has to be verified to test what it
 claims to test) applied to this project's own verification tooling, not
 just the system under test - and it was caught by actually reading the
 "orphaned" list instead of trusting the count.
+
+## 37. Step 6, re-verified 5/5 - not trusted on the first green run
+
+Same discipline as smoke test step 5 (DEFENSE.md #24): a single pass
+means nothing on its own in this project's own history (#20/#21, #32's
+entire diagnostic odyssey). With #33 through #36's fixes all in place,
+the identical commit was re-run five times via `gh run rerun`, not
+trusted on the first green result. All five: pass, all 11 stages,
+`events_emitted == events_landed_total_rows` with `duplicate_key_count:
+0` and `gap_count: 0` every time, orphan count correctly scoped and
+consistent with expectations.
+
+The full path from a parked, unresolved bug to this point: #32's five
+diagnostic-tooling gaps (a swallowed print, a too-late log dump, the
+wrong capture command, a wrong guessed path, and finally the missing
+`log4j-console.properties` root cause), #33's actual root cause (the
+Iceberg catalog silently absorbing the Kafka table), #34's Kafka
+listener gap, #35's Java 21 module-encapsulation gap, and #36's own
+verification-script bug - each one found from real evidence, not
+guessed, each one fixed and re-verified before moving to the next. Step
+6 is genuinely, reproducibly green. This is the exactly-once mechanism
+DEFENSE.md #19 described, before any of this code existed, working
+under a real, injected TaskManager failure - not assumed, demonstrated.
