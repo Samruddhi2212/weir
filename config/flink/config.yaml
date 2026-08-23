@@ -9,6 +9,19 @@
 # sensitivity sweep can vary it without editing this file. See
 # DEFENSE.md #1.
 
+# Required for Java 17+ support (this image runs Java 21) - verbatim
+# copy of Flink 2.1's own default config.yaml (apache/flink, release-2.1
+# branch), not reconstructed. Without this, Kryo's reflective access to
+# JDK-internal fields (e.g. java.nio.ByteBuffer's private hb array,
+# needed to checkpoint some Kafka source state) throws
+# InaccessibleObjectException under Java 17+'s module encapsulation -
+# confirmed the hard way: docker-compose.yml's conf bind mount replaces
+# the image's entire conf directory, and this project's own config.yaml,
+# adapted from a pre-2.1/pre-Java21 reference file, never carried these
+# defaults forward. Same root cause as DEFENSE.md #26's missing
+# log4j-console.properties. See DEFENSE.md #35.
+env.java.opts.all: --add-exports=java.rmi/sun.rmi.registry=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED --add-exports=java.security.jgss/sun.security.krb5=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.text=ALL-UNNAMED --add-opens=java.base/java.time=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED
+
 jobmanager.rpc.address: flink-jobmanager
 jobmanager.rpc.port: 6123
 jobmanager.memory.process.size: 1600m

@@ -40,10 +40,12 @@ services:
       - weir
     ports:
       - "${KAFKA_PORT:-9092}:9092"
-      # Separate listener for host-side clients (e.g. ingestion/replay/
-      # replay_producer.py) - see DEFENSE.md #34 (found and fixed on
-      # exactly-once-validation, ported here since any host-side Kafka
-      # client would hit the identical unreachable-hostname problem).
+      # Separate listener for host-side clients (scripts/produce_events.py,
+      # ingestion/replay/replay_producer.py) - see DEFENSE.md #34 for why
+      # a single listener can't serve both audiences. Kafka's own
+      # metadata response tells a client where to reconnect for actual
+      # produce/fetch traffic; a client outside the weir-network can't
+      # resolve "kafka" as a hostname at all.
       - "${KAFKA_EXTERNAL_PORT:-29092}:29092"
     environment:
       KAFKA_NODE_ID: 1
@@ -53,10 +55,11 @@ services:
       CLUSTER_ID: ${KAFKA_CLUSTER_ID:-4L6g3nShT-eMCtK--X86sw}
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,EXTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
       # PLAINTEXT (advertised as the container hostname) is what every
-      # in-network client uses - unchanged. EXTERNAL (advertised as
-      # localhost:<mapped port>) is for host-side Python clients outside
-      # the weir-network entirely. Two listeners because no single
-      # advertised address is reachable from both.
+      # in-network client uses (Flink's Kafka SQL connector, smoke_test.sh's
+      # `docker compose exec` calls) - unchanged. EXTERNAL (advertised as
+      # localhost:<mapped port>) exists only for host-side Python clients
+      # that connect from outside the weir-network entirely. Two listeners
+      # because no single advertised address is reachable from both.
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:${KAFKA_EXTERNAL_PORT:-29092}
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
@@ -225,7 +228,8 @@ services:
       # (see PROVENANCE.md), or log4j falls back to essentially no
       # console output at all ("Reconfiguration failed: No configuration
       # found..."), confirmed the hard way across several real CI runs
-      # before this was understood - see DEFENSE.md #26.
+      # before this was understood - see DEFENSE.md #32 (also ported to
+      # main as its own entry, #26, since it's a base-infrastructure fix).
       - ./config/flink:/opt/flink/conf
       # Committed, reviewable SQL fixtures (see DEFENSE.md #10) - read-only
       # is fine here, unlike the conf mount above, since nothing needs to

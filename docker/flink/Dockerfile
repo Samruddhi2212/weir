@@ -43,7 +43,8 @@
 # owned by root, and the non-root `flink` user this image runs as
 # (see DEFENSE.md #10 - same class of bug, this time on a directory
 # instead of a copied-in file) can't write into it, which only ever
-# surfaces once a job actually tries to checkpoint - see DEFENSE.md #25.
+# surfaces once a job actually tries to checkpoint - see DEFENSE.md #30
+# (also ported to main as its own entry, #25).
 
 FROM flink:2.1.0-java21@sha256:11d31310a00763e0927325c6fcfe65961c9170c05ce421b9458b923004e95895
 

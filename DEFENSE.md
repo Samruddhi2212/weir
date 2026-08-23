@@ -468,6 +468,124 @@ diagnostic_limit.sql` (the original LIMIT approach, 180s timeout,
 reported but not asserted). Whichever way that resolves, the gating
 check no longer depends on the answer.
 
+## 19. How Flink's checkpoint barrier coordinates with Iceberg's commit protocol
+
+Written before any of step 6's code, on purpose - if this can't be
+explained correctly first, the code that depends on it can't be trusted
+either.
+
+**The general mechanism (not Iceberg-specific).** Flink's checkpointing
+is a distributed snapshot (Chandy-Lamport style). The JobManager tells
+source operators to checkpoint; each source records its own restart
+position (for a Kafka source, the consumed offsets) and emits a special
+*barrier* record, tagged with a checkpoint ID, into every output channel.
+Every downstream operator does *barrier alignment*: on receiving a
+barrier on one input channel, it holds back new records on that channel
+until the same barrier has arrived on *all* its input channels. Only
+once aligned does the operator snapshot its own state and forward the
+barrier downstream. This guarantees a single, globally consistent cut
+across the whole dataflow graph, not just a per-operator local snapshot.
+Once every operator (source through sink) has acknowledged its part of
+checkpoint N to the JobManager, the JobManager marks checkpoint N
+complete and fires `notifyCheckpointComplete(N)` on every operator.
+
+**What Iceberg's Flink sink does with this, specifically.** It's not one
+operator, it's two, chained: `IcebergStreamWriter` (parallel, one
+instance per subtask) followed by `IcebergFilesCommitter` (a single,
+non-parallel instance). When the writer receives checkpoint N's barrier,
+it flushes whatever rows it's buffered into closed, durable data files
+(Parquet, in this project's config) on the object store, and emits a
+*committable* downstream describing those files - it does **not** touch
+the Iceberg catalog at this point. The committer collects committables
+from all writer subtasks for checkpoint N and holds them as its own
+pending state (itself included in checkpoint N's snapshot, so a crash
+here isn't lost - the restored committer still has the pending record).
+Only on `notifyCheckpointComplete(N)` - proof that *every* operator's
+part of checkpoint N is durably persisted - does the committer actually
+commit: it builds a new Iceberg snapshot referencing exactly those data
+files and atomically updates the catalog pointer to it. Confirmed against
+Iceberg's own docs (`flink-writes.md`): "Iceberg commit happened after
+successful Flink checkpoint in the `notifyCheckpointComplete` callback."
+
+**What makes this exactly-once instead of at-least-once.** The commit
+that makes data *visible* (the new Iceberg snapshot) is deferred until
+Flink's own checkpoint - source offsets included - is fully durable. If
+anything fails before `notifyCheckpointComplete` fires, Flink doesn't
+try to finish that checkpoint; it restarts the whole job from the last
+*completed* checkpoint, replaying the Kafka source from exactly the
+offsets recorded there. Whatever data files the writer had already
+flushed for the failed attempt are simply never referenced by any
+manifest - not rolled back, just never wired in - and the replayed data
+gets written and committed fresh. So each Iceberg snapshot corresponds to
+exactly one Flink checkpoint's worth of data: a checkpoint either
+completes fully (offsets advanced and data committed, as a unit, from
+any external reader's point of view) or is treated as if it never ran.
+That's what rules out both failure modes at once - no gaps (the next
+completed checkpoint always resumes from the last *committed* offset)
+and no duplicates (a replayed checkpoint's output either commits once or
+not at all, never twice). The second half of "not twice": a *retried*
+commit of the same checkpoint (e.g. the JDBC commit to Postgres succeeds
+but the acknowledgment back to Flink is lost) also can't double-commit -
+Iceberg's snapshot summary records the last successfully committed
+checkpoint ID, and the committer checks it before committing again.
+Deferred commit prevents a crash from producing a duplicate; checkpoint-
+id idempotency prevents a *retry* from producing one.
+
+**Where the vulnerability window actually is.** Between the writer
+flushing data files to the object store (on barrier receipt) and the
+committer's catalog update actually completing (on
+`notifyCheckpointComplete`). Inside that window, the files are real,
+durable, and sitting in SeaweedFS - but nothing in the catalog points to
+them yet. Anything that fails in that window - JobManager crash,
+TaskManager crash, a network partition to Postgres during the commit
+transaction - leaves those specific files exactly where an orphan check
+should find them.
+
+**What "orphaned file" means, concretely, for
+`scripts/verify_exactly_once.py`.** Iceberg tracks table contents through
+a metadata tree: table metadata -> snapshot -> manifest list -> manifest
+files -> individual data file entries. A file is orphaned if it
+physically exists under the table's warehouse path in the object store
+but is not reachable by walking that tree from *any* snapshot, past or
+present. It's not a duplicate (it's never visible to a reader - nothing
+points to it) and it's not a gap (the data it contains, if any was ever
+meant to be committed, was re-processed and committed via the replay);
+it's wasted storage from an interrupted commit, nothing more. Detecting
+it means listing every file actually present under the warehouse prefix
+and diffing that against the set of file paths referenced by every
+manifest of every snapshot currently in the table's metadata.
+
+**PyFlink or Java - the honest answer.** It depends on which Iceberg API
+the job uses, and the two have different language support:
+
+- Iceberg's Table API / SQL integration (`CREATE CATALOG` /
+  `CREATE TABLE` / `INSERT INTO ... SELECT ...`) - exactly what
+  `scripts/sql/smoke_step4.sql` and `smoke_step5.sql` already use - works
+  fully from PyFlink. PyFlink's Table API is a complete wrapper over the
+  same Java table planner; there's no capability gap. Iceberg's own docs
+  state the exactly-once guarantee applies to both its DataStream and
+  Table API integrations, and a real user got PyFlink+Iceberg working
+  (blocked only by JAR-packaging constraints on a managed runtime, not by
+  any PyFlink API limitation - `apache/iceberg#4633`).
+- Iceberg's lower-level DataStream sink builder
+  (`org.apache.iceberg.flink.sink.FlinkSink.forRowData(...)`), which
+  gives finer-grained programmatic control over the write path, is
+  documented only in Java. No PyFlink-native equivalent is documented or
+  was found. If that specific API is what's wanted, Java is required.
+
+Given this project's existing, already-debugged classpath (Kafka SQL
+connector, Iceberg runtime + JDBC catalog, Hadoop client jars, all
+already proven to load correctly in `docker/flink/Dockerfile`'s image),
+the recommendation is: don't introduce a new dependency surface (a
+PyFlink Python environment, or a Java job compilation/packaging
+pipeline) for this validation at all. Express step 6's Flink job as SQL,
+submitted via `sql-client.sh` exactly like the smoke test already does,
+with `SET 'execution.checkpointing.interval' = '10s';` scoping the
+10-second interval to that session's job without touching the cluster-
+wide default. This is a recommendation, not a decision made unilaterally
+- if a real compiled job (Python or Java) is wanted instead, for its own
+reasons, that's a call this project doesn't get to make for you.
+
 ## 20. The diagnostic answered its question, then became a resource-contention risk
 
 Ran once, got a clean answer, then got removed. The #18 diagnostic ran in
@@ -734,17 +852,225 @@ the first green result. All five: pass, `WEIR_ROW_COUNT=2`, no
 `S3Exception`, no `table.dml-sync` timeout. Step 5 - and steps 2 through
 5 as a whole - is genuinely green, not a lucky single run.
 
-## 25. A latent infrastructure bug in the base image, only reachable once a job actually checkpoints
+## 25. Step 6's producer: a real delivery-confirmed client, not the console-producer CLI
 
-Found on the `exactly-once-validation` branch, while building step 6's
-continuous Kafka -> Iceberg validation job - but the bug itself lives
-here, in `docker/flink/Dockerfile`, and would hit any streaming job on
-`main` too, not just that branch's work. Ported here in its own commit
-rather than left stranded on a feature branch.
+`scripts/produce_events.py`'s emission log has to be ground truth for
+`scripts/verify_exactly_once.py` - every later count (landed, duplicates,
+gaps) is only as trustworthy as "the events in this log were genuinely
+sent." That requirement, not just convenience, is what the tool choice
+turns on.
 
-First submission of a genuinely continuous streaming job (unlike
-`smoke_step4.sql`/`smoke_step5.sql`, both bounded/batch) failed before
-the job even started running:
+**Alternative rejected:** reuse `kafka-console-producer.sh` (the tool
+smoke test step 3 already uses, zero new dependencies) in a loop,
+logging each key/timestamp to the emission log immediately before or
+after feeding it a line. Rejected because "logged" and "confirmed
+delivered" would be two different things with this tool: console-
+producer batches internally and has no way to expose a per-message
+delivery callback back to the shell loop driving it. A log entry would
+mean "we asked Kafka to send this," not "Kafka's leader acked this" -
+weaker than what an exactly-once verification should be built on.
+
+**Chosen, after asking rather than deciding unilaterally (CLAUDE.md hard
+rule 6):** `kafka-python` (pinned `3.0.11`, Apache-2.0, confirmed via
+PyPI's own package metadata - a pure-Python client, no C extension to
+complicate the CI environment). Every send registers a delivery callback
+via `.add_callback(...)`/`.add_errback(...)`; the emission log is written
+*only* from the success callback, after the broker has acked the write,
+never speculatively before sending. A failed delivery is written to
+stderr and recorded as a hard failure, not silently dropped - if the
+producer can't confirm a send, that has to be visible, not smoothed over
+by "the log just doesn't mention it."
+
+Tradeoff accepted: one new Python dependency, for one script, that
+nothing else in this project needs. Scoped narrowly on purpose - it's a
+dependency of the *validation tooling*, not of any job or service this
+project ships, matching the same category as `pytest` already is.
+
+## 26. Detecting orphaned files: SeaweedFS's own tools can't do it; Iceberg's `$all_data_files` plus the Filer's JSON API can
+
+DEFENSE.md #19 defined what an orphaned file is: physically present under
+the table's warehouse path, but not reachable from *any* snapshot's
+manifest tree, past or present. Two lists have to be built and diffed:
+every file Iceberg has ever referenced, and every file actually sitting
+in the object store.
+
+**The referenced side.** Checked Iceberg's own Flink SQL metadata-table
+docs before assuming `$files` (the one already known from casual
+familiarity) was enough: `$files` only covers the *current* snapshot.
+`$all_data_files` is the one documented to span every snapshot the table
+has ever had, expired or not - confirmed against Iceberg's own Flink
+querying docs, not assumed from the Spark-side naming convention.
+`SELECT file_path FROM eos_events$all_data_files` is what
+`verify_exactly_once.py` actually runs, via the same `sql-client.sh -f`
+mechanism every other SQL step in this project already uses.
+
+**The on-disk side - two tools considered, one rejected on inspection.**
+`weed shell`'s `fs.tree` is documented as "recursively list all files
+under a directory" - looked like the obvious fit. Checked its actual
+source (`command_fs_tree.go`) before relying on it: it prints a box-
+drawing tree (`├──`, `└──`, Unicode line characters), built specifically
+for human eyes, with no flag to emit flat paths instead. Reconstructing
+full paths from indentation and tree-drawing characters is exactly the
+kind of "parse loosely-structured output and hope" this project has
+already been burned by once this session (`grep -qE '\b2\b'`, DEFENSE.md
+#14) - rejected before writing a single line depending on it.
+
+**Chosen:** SeaweedFS's Filer HTTP API, which returns real JSON on
+request (`Accept: application/json`) for any directory: `{"Path": ...,
+"Entries": [{"FullPath": ..., "Mode": ..., "chunks": [...]}, ...]}` -
+confirmed against the Filer Server API wiki page directly, not
+recalled. `verify_exactly_once.py` walks this recursively from the
+warehouse root using Python's stdlib `urllib` and `json` (no new
+dependency - unlike #25, this one didn't need one), treating an entry as
+a file if its `chunks` key is present (even as an empty list) and a
+directory otherwise, per the wiki's own description ("files include a
+chunks array; directories do not"). Handles the API's own pagination
+(`Limit`/`LastFileName`/`ShouldDisplayLoadMore`) rather than assuming a
+single page always covers a table this small - a smoke-scale run
+probably never hits the 100-entry default limit, but "probably won't
+matter" is exactly the standard this project has been holding itself to
+not accepting all session.
+
+**Stated honestly, not swept under the same confidence as the rest of
+this entry:** the file-vs-directory heuristic (chunks key present vs.
+absent) is inferred from the wiki's prose, not exhaustively verified
+against SeaweedFS's own source the way #22's healthcheck fix or #25's
+delivery-callback behavior were. If orphan-file counts ever look wrong in
+a way nothing else explains, this heuristic - not a re-guess at something
+else - is the first thing to re-check.
+
+## 27. Killing the TaskManager for real, and bringing it back without changing docker-compose.yml's failure-handling behavior for everything else
+
+`flink-taskmanager` in `docker-compose.yml` has no `restart:` policy - the
+Compose default, `no`. A real container crash (OOM, node failure, a bad
+deploy) would just leave it dead until something else notices and acts;
+nothing in this stack currently auto-heals that. That's the honest
+starting condition this test runs against, not a gap introduced for the
+test's convenience.
+
+**Alternative rejected:** add `restart: on-failure` (or
+`unless-stopped`) to `flink-taskmanager` in `docker-compose.yml`, so a
+killed container comes back on its own during the test. Rejected because
+that's a real, permanent change to this project's general failure-
+handling posture - affecting every future run, every other kind of
+TaskManager failure, not just this one destructive test - decided as a
+side effect of writing a test script, not as its own considered choice.
+If always-restart TaskManagers is the right call for this project, that
+deserves its own DEFENSE.md entry made on its own merits, not smuggled in
+here.
+
+**Chosen:** `scripts/verify_recovery.sh` does both halves explicitly and
+visibly. `docker compose kill -s SIGKILL flink-taskmanager` for the
+failure itself - SIGKILL, not `stop` (SIGTERM, graceful) or `restart`,
+because a real crash doesn't wait for the process to clean up, and this
+test is specifically about what happens when it doesn't. Then `docker
+compose start flink-taskmanager` to bring the container back - standing
+in for whatever infra-level mechanism (a orchestrator restarting a pod, a
+supervisor process, a human) would do that in a real deployment, which is
+explicitly out of scope for what this test is verifying. What's being
+tested here is what Flink itself does once task slots exist again, not
+whether the surrounding infrastructure heals itself - `docker-compose.yml`
+stays exactly as failure-tolerant (or not) as it already was for every
+other purpose.
+
+**Stopping the job at the end:** `bin/flink stop <jobID>`, not `cancel` -
+a graceful stop triggers a final savepoint before terminating, `cancel`
+does not. `config/flink/config.yaml` already sets `state.savepoints.dir:
+file:///tmp/flink-savepoints`, and that volume is already mounted in
+`docker-compose.yml` for both Flink services - `stop` works with no
+extra flag or new infrastructure, entirely because that groundwork
+already existed for an unrelated reason.
+
+## 28. Overriding checkpoint interval for real: min-pause has to move too, or "10s" is a lie
+
+The task asks for checkpoint interval overridden to 10s "via the env
+var, not hardcoded" for this one validation job, without touching the
+cluster-wide 60s default (DEFENSE.md #1) other jobs still run under.
+
+**Session-scoped, not cluster-scoped, confirmed before relying on it:**
+checked whether Flink SQL Client's `SET` actually applies arbitrary
+`execution.checkpointing.*` keys to a job submitted from that session, or
+only a curated subset - confirmed real usage of `SET
+'execution.checkpointing.interval' = '5 s';` in this exact form, not
+assumed from the `FLINK_PROPERTIES` mechanism already used elsewhere in
+this project (that one works at the container/cluster level, a different
+mechanism entirely). `scripts/sql/exactly_once_job.sql` sets it via a
+sentinel token (`__WEIR_EOS_CHECKPOINT_INTERVAL__`), substituted from a
+new `WEIR_EOS_CHECKPOINT_INTERVAL` env var (default `10s`) the same way
+`smoke_step5.sql` already substitutes credentials - never hardcoded in
+the committed file.
+
+**The part that would have quietly broken this:** `config/flink/
+config.yaml` also sets `execution.checkpointing.min-pause: 30s`
+cluster-wide - the minimum gap enforced between the *end* of one
+checkpoint and the *start* of the next, independent of the interval
+setting. Left alone, a 10s interval with a 30s min-pause doesn't produce
+checkpoints every 10s; min-pause dominates whenever it's the larger of
+the two, so the job would actually checkpoint no more often than every
+~30s+ while still claiming a "10s" interval - not wrong, just silently
+not doing what it says, exactly the class of mismatch DEFENSE.md #16
+already found once (a setting nobody stated explicitly, quietly
+determining behavior instead of the one everybody was looking at).
+`exactly_once_job.sql` also sets `SET 'execution.checkpointing.min-pause'
+= '0s';` for this session, so the 10s interval is the actual cadence, not
+a number that only appears in a config key nothing enforces.
+
+**Scope limitation, stated rather than silently assumed:** the topic
+(`weir-eos-events`) is created with a single partition, matching smoke
+test step 3's own convention. This keeps gap/duplicate accounting exact
+(no cross-partition interleaving to reason about) but means this run
+doesn't exercise `IcebergStreamWriter`'s parallel-subtask-commit path
+described in DEFENSE.md #19 under real multi-partition concurrency -
+only its single-partition case. If that path specifically needs
+validating later, it needs its own run with a multi-partition topic, not
+an assumption that this one already covered it.
+
+## 29. TABLEAU mode's 30-character column truncation would have silently corrupted the orphan-file comparison
+
+Almost shipped `scripts/sql/exactly_once_verify.sql`'s file-path dump
+using the exact same sentinel-grep pattern as `smoke_step5.sql`
+(`WEIR_FILE=<path>`), the same way `WEIR_ROW=` already works for
+event rows. Checked one assumption before trusting it for `file_path`
+specifically, since S3 URIs are long and event keys aren't: does
+`sql-client.sh`'s TABLEAU result mode ever truncate a column's printed
+value? Confirmed, not hypothetical: Flink's own SQL Client
+documentation states long string values are truncated to 30 characters
+by default. `s3a://weir-warehouse/warehouse/eos_test/eos_events/data/...`
+is comfortably past that. A silently truncated path would never match
+anything in the Filer's actual on-disk listing - every real data file
+would have registered as a false orphan, and the count would have looked
+like a specific, plausible finding instead of what it actually would
+have been: a display setting nobody looked at.
+
+**Alternative drafted, then abandoned as disproportionate:** route both
+the row-dump and the file-list-dump through a Flink filesystem-connector
+sink (`INSERT INTO ... WITH ('connector'='filesystem', ...)`), writing
+CSV directly to a bind-mounted host directory, bypassing terminal
+rendering entirely. Would have worked, but it's a new docker-compose.yml
+volume mount, a new host-directory-permissions question (the same
+non-root `USER flink` problem DEFENSE.md #10 already solved once, just
+in the write direction this time), and an unverified assumption about
+exactly how Flink's filesystem connector lays out batch INSERT output
+(one file at the given path, or a directory of part-files - not checked,
+because it turned out not to be necessary).
+
+**Chosen, once the simpler fix was confirmed real:** raise the limit via
+`SET`. `sql-client.display.max-column-width` is the name most search
+results surface, but it's deprecated as of FLIP-279/FLINK-30025 (fixed
+in Flink 1.18.0, well before this project's pinned 2.1.0) in favor of
+`table.display.max-column-width` - used the current key, not the
+deprecated one, confirmed against the JIRA ticket's own fix-version
+field rather than the first name found. Set to `500` in
+`exactly_once_verify.sql`, comfortably past any path this warehouse
+layout produces. One `SET` statement, zero new infrastructure, and the
+sentinel-grep pattern already proven in `smoke_step5.sql` stays exactly
+as it was.
+
+## 30. A latent infrastructure bug in the base image, only reachable once a job actually checkpoints
+
+First real run of `scripts/verify_recovery.sh` failed before the job
+even started - not in any step-6-specific code, in job submission
+itself:
 
 ```
 Caused by: java.io.IOException: Failed to create directory for shared state: file:/tmp/flink-checkpoints/<job-id>/shared
@@ -752,103 +1078,603 @@ Caused by: java.io.IOException: Failed to create directory for shared state: fil
 	at org.apache.flink.runtime.checkpoint.CheckpointCoordinator.<init>(...)
 ```
 
-Root cause: `docker/flink/Dockerfile` never creates `/tmp/flink-
-checkpoints` or `/tmp/flink-savepoints` - those paths have only ever
-existed via `docker-compose.yml`'s named volumes, mounted over a path
-the image itself has nothing at. A fresh named volume with no matching
+Root cause, once traced back: `docker/flink/Dockerfile` never creates
+`/tmp/flink-checkpoints` or `/tmp/flink-savepoints` - those paths have
+only ever existed via `docker-compose.yml`'s named volumes
+(`flink-checkpoints:`/`flink-savepoints:`), mounted over a path the
+image itself has nothing at. A fresh named volume with no matching
 content already in the image gets created at first mount owned by
 root, not by the non-root `flink` user (uid 9999, confirmed from
 `apache/flink-docker`'s own Dockerfile) this image runs as. Same root
 cause as DEFENSE.md #10 - a non-root user meeting something it can't
-write to - but on a directory Docker creates at mount time, not a file
-this project copies in.
+write to - but on a directory Docker itself creates at mount time,
+not a file this project copies in.
 
-**Why this was never caught before, honestly:** `execution.checkpointing.
-interval: 60s` (DEFENSE.md #1) applies cluster-wide regardless of job
-type, but batch execution doesn't enable checkpointing the way a
-continuous streaming job does - nothing submitted on `main` before this
-had ever actually asked the JobManager to construct checkpoint storage.
-The permission problem was latent since `docker-compose.yml` first added
-those volumes, reachable by any streaming job, just never triggered
-because none had been submitted yet.
+**Why this was never caught before, honestly:** every SQL run in this
+project until now (`smoke_step4.sql`, `smoke_step5.sql`) was bounded/
+batch. Batch execution in Flink doesn't enable checkpointing the same
+way a continuous streaming job does - `execution.checkpointing.interval:
+60s` sits in `config/flink/config.yaml` and applies cluster-wide
+regardless, but nothing before `exactly_once_job.sql` (streaming,
+by construction - it reads an unbounded Kafka source) had ever actually
+asked the JobManager to construct checkpoint storage. The permission
+problem was latent in this project's infrastructure since `docker-
+compose.yml` first added those volumes, reachable by any streaming job,
+just never triggered because none had been submitted yet.
 
 **Fixed** in `docker/flink/Dockerfile`, before `USER flink`: `mkdir -p
 /tmp/flink-checkpoints /tmp/flink-savepoints && chown -R flink:flink
 ...`. Docker's documented behavior for named volumes - content (and
 ownership) already present in the image at a mount point gets copied
-into a freshly created volume on first mount - means this is enough; no
-entrypoint wrapper, no runtime chown, no change to `docker-compose.yml`
-at all.
+into a freshly created volume on first mount - means this is enough;
+no entrypoint wrapper, no runtime chown, no change to `docker-
+compose.yml` at all.
 
-## 26. Flink's console logging has been silently broken since the conf mount was added
+**Scope note:** this is a base-infrastructure fix, not a step-6-only
+one - it belongs on `main`, not just `exactly-once-validation`, since
+any future streaming job (not only this validation) would have hit the
+identical failure the first time it tried to checkpoint. Ported to
+`main` in its own commit rather than folded silently into a step-6
+commit on this branch.
 
-Found on `exactly-once-validation` while trying (for the fifth time) to
-capture useful JobManager/TaskManager logs to diagnose an unrelated bug
-(a job reaching `FINISHED` with zero records read) - but the root cause
-lives here, on `main`, since before that branch existed.
+## 31. An assertion-auditing bug found by auditing this script's own assertions: a diagnostic print swallowed into a variable instead of printed
 
-Every prior diagnostic attempt assumed detailed Flink logging existed
-*somewhere* and just hadn't been found yet. It didn't exist at all:
-`GET /jobmanager/logs` (Flink's own REST API) returned `{"logs":[]}`; a
-filesystem-wide `find` turned up nothing Flink-related, only OS
-package-manager logs; and the *entire* `docker compose logs` output for
-both containers across their whole lifetime - not a truncated tail,
-everything either container had ever printed - was two `Permission
-denied` lines (already known, DEFENSE.md #13), a "Starting X
-Manager"/"console application" pair, and two `main ERROR
-Reconfiguration failed: No configuration found for '<hash>' at 'null'
-in 'null'` lines. That last one is log4j2's own bootstrap-failure
-message - checked rather than dismissed as more noise.
+Explicitly asked to audit every assertion in this script against the
+class of bug in #14 - here's a real one, in the *plumbing* around an
+assertion rather than the comparison itself.
 
-Root cause: `docker-compose.yml`'s `./config/flink:/opt/flink/conf`
-bind mount **replaces** the image's entire `conf/` directory rather
-than overlaying it. `config/flink/` has only ever contained
-`config.yaml` (added in DEFENSE.md #13) - meaning the image's own
-default `log4j-console.properties`, the file Flink's own logging docs
-name specifically for "Job-/TaskManagers run in the foreground" (exactly
-what "Starting standalonesession as a console application" describes),
-has been absent from both containers since that mount was first added.
-Log4j2 falls back to near-zero output instead of the INFO-level console
-logging (and rolling file appender) that file actually configures.
+`wait_for_checkpoints()` was called as `BASELINE_CHECKPOINTS="$(wait_for_
+checkpoints 3 180)"` - a command substitution, so the *entire* function's
+stdout becomes the captured value, not just the `echo "$completed"` line
+intended as its "return value." Its own failure path called `print_raw
+"final checkpoints JSON" "$cp_json"` to explain *why* it timed out - and
+that diagnostic output went into `$BASELINE_CHECKPOINTS` right along
+with everything else, never printed to the actual log at all. The second
+real run of this script (see #30 for the first) timed out at this exact
+stage, and the log showed the timeout message but not one byte of the
+diagnostic that was supposed to explain it - a checkpointing failure
+this project still doesn't have a root cause for yet, made harder to
+diagnose by the very telemetry meant to help.
 
-**Why this was never caught on `main`:** nothing here has ever needed
-to read detailed Flink logs to debug a failure - `smoke_test.sh` steps
-4/5's own assertions (DEFENSE.md #14) check exit codes and sentinel
-markers in SQL output, never Flink's own log content. It took a bug
-that specifically required reading JobManager logs to notice logging
-itself was broken.
+This isn't the #14 pattern itself (a check that passes when it
+shouldn't) - it's adjacent: a check that fails *correctly* while
+destroying the evidence needed to explain the failure, because "return a
+value" and "print diagnostics" were sharing the same channel (a
+function's stdout) without that being a deliberate choice.
 
-Fixed with `config/flink/log4j-console.properties` - a verbatim,
+Fixed by giving the function's result its own channel - a global
+(`WAIT_RESULT`), set before returning, read by the caller afterward -
+freeing stdout entirely for `print_raw`/`echo` diagnostics, which is
+what every other stage in this script already uses stdout for. Also
+added a per-poll progress line (job state + checkpoint count, every 5s)
+rather than only printing at the very end, so a future timeout shows the
+whole trajectory - stuck at zero from the start, versus slowly climbing
+and running out of budget, are different findings and shouldn't require
+a third run just to tell apart.
+
+## 32. The "continuous" job wasn't continuous - it finished on its own in ~2 seconds, reading zero records
+
+With #31's fix in place, the third real run finally showed what stage 5
+had been timing out on: `job state=FINISHED, completed checkpoints=1`
+from the very first poll, unchanged for the full 180s. The job's own
+`/jobs/<id>` detail, pulled before failing:
+
+```
+"state":"FINISHED","job-type":"STREAMING","start-time":...,"end-time":...,"duration":3011,
+"vertices":[{"name":"Source: eos_kafka_source[1] -> IcebergStreamWriter -> ...",
+  "status":"FINISHED",...,"metrics":{"read-records":0,"read-records-complete":true,
+  "write-records":0,"write-records-complete":true,...}}]
+```
+
+Not a crash, not a hang - `job-type` is genuinely `STREAMING` (confirming
+`execution.checkpointing.interval`/`min-pause`/`runtime-mode` overrides
+from DEFENSE.md #28 *were* applied), and the job voluntarily completed
+in about 3 seconds having read zero records, with `read-records-complete:
+true` - a Flink-internal signal specifically meaning the source decided
+it had no more data coming, not that it errored or was cancelled. The
+single "completed checkpoint" is consistent with a final checkpoint
+taken as part of that voluntary shutdown, not a periodic 10s checkpoint
+during real execution - the job never lived long enough for a second
+periodic one regardless.
+
+Checked before accepting a guess: Flink's own Kafka source documentation
+states the default stopping-offsets initializer for an unbounded source
+(`NoStoppingOffsetsInitializer`) "does not initialize anything" and the
+source "never stops until the Flink job fails or is cancelled" absent an
+explicit `scan.bounded.mode` - which this job's DDL never set. That's
+the *documented* default behavior, and it's what should have happened
+here. It didn't, and stated honestly: the exact internal mechanism that
+made *this* source finish anyway - something specific to a single-
+partition topic that is still completely empty (0 messages, consumer
+position already equal to the high watermark) at the moment the source
+starts - was not tracked down to a specific line of Flink or the Kafka
+connector's source. This project's own timeline explains why the
+condition existed: `scripts/verify_recovery.sh` created the topic (stage
+2) and submitted the job (previously stage 3) *before* starting the
+producer (previously stage 4) - by design, reasoning at the time that
+`scan.startup.mode='earliest-offset'` made the ordering irrelevant to
+correctness. It made the topic genuinely empty at the exact moment the
+source read from it, which turned out to matter for a different reason
+than data correctness.
+
+**Fixed two ways, not one, because the mechanism itself isn't fully
+confirmed:**
+
+1. Reordered `scripts/verify_recovery.sh`: the producer now starts
+   first (new stage 3), confirmed running for 3 seconds before the job
+   is submitted (new stage 4) - the source's very first poll has real
+   data waiting, removing the empty-topic condition entirely.
+2. Added `'scan.topic-partition-discovery.interval' = '10s'` to
+   `eos_kafka_source` in `exactly_once_job.sql` - continuous partition
+   discovery instead of the connector's one-time-at-startup default, as
+   a second, complementary line of defense in case the actual mechanism
+   is related to split/partition enumeration finalizing early rather
+   than (or in addition to) the empty-topic condition itself.
+
+Recorded as two fixes rather than confidently claiming one root cause,
+because that's the honest state of the investigation: the reorder
+directly removes the specific condition observed in the failing run: the
+partition-discovery setting is a reasoned hedge, not a confirmed
+independent fix. If a future run still finishes early with a non-empty
+topic at start, the discovery setting - not a new guess - is the next
+thing to test in isolation.
+
+**Addendum - the fourth real run disproved the reorder's assumption
+outright.** With the producer confirmed running for 3 seconds before
+the job was submitted, the job still finished, in about 3 seconds,
+having read zero records - the exact same signature as before, just a
+few seconds later. The empty-topic-at-start theory is now disproven by
+direct evidence, not just unconfirmed: the topic demonstrably had data
+by the time this job read from it, and it still happened.
+
+That run also exposed a second problem in the *investigation* itself:
+`dump_logs_and_fail`'s `--tail=200` container-log dump ran only after
+the full 180s wait budget expired, by which point 175+ seconds of
+routine Kafka heartbeat/consumer-group logging had scrolled whatever the
+JobManager logged at actual completion time out of a 200-line window -
+the diagnostic evidence was gone before it was ever captured, for the
+second run in a row. Fixed by treating `FINISHED`/`FAILED`/`CANCELED` as
+terminal inside `wait_for_checkpoints` itself (mirroring what stage 8
+already does for job recovery) - failing within one 5-second poll cycle
+of the state actually changing, not 180 seconds later, so the next run's
+log dump has a real chance of showing what actually happened instead of
+three minutes of unrelated noise.
+
+**Second addendum - the fail-fast fix worked, and immediately exposed a
+third, different gap in the investigation itself.** The fifth real run
+failed within 5 seconds as intended, but `dump_logs_and_fail`'s
+container-log dump still showed nothing but container *startup* banners
+(`Starting Job Manager`, `Starting standalonesession as a console
+application`) - no job-lifecycle or source-completion messages at all,
+regardless of timing. `docker compose logs` only surfaces what a
+container prints to its own stdout/stderr; Flink's `standalonesession`
+entrypoint runs as "a console application" for supervisory output only
+- its actual operational logging (job state transitions, source/split
+lifecycle) goes to log *files* inside the container
+(`/opt/flink/log/*.log`), never touching stdout at all. Three
+consecutive real runs have now each surfaced a genuine gap before ever
+reaching the underlying question - a broken diagnostic swallowing
+output (#31), a timeout dumping logs 175s too late (#32's first
+addendum), and now dumping the wrong log source entirely.
+
+**Status, stated plainly rather than pushed further right now:** the
+underlying bug - a nominally-continuous streaming Kafka source reaching
+`FINISHED` with zero records read, even with confirmed live data in the
+topic before the job was ever submitted - is not yet root-caused.
+Parked here, not abandoned silently: the concrete next step is reading
+`/opt/flink/log/*.log` directly (via `docker compose exec ... cat`, not
+`docker compose logs`) at the moment of failure, to see what the
+JobManager and TaskManager actually logged about the source/split
+lifecycle - not a new guess, the specific gap this addendum identifies.
+This is deliberately being set aside now to start Part 2.1 (NYC TLC
+downloader + replay producer, which only needs Kafka, already green) in
+parallel, per explicit instruction not to block on this.
+
+**Third addendum - re-audited before resuming, per E5/E6.** Explicitly
+re-checked whether `scan.bounded.mode` could have leaked in from
+`smoke_step4.sql`'s diagnostic (the exact bug class E6 warns about): it
+doesn't appear anywhere in `exactly_once_job.sql`, only in the separate
+`smoke_step4.sql`, and `sql-client.sh -f` takes no `--init`/shared-
+session file - each invocation is a fresh process with no mechanism to
+inherit settings from a different file's separate invocation. No leak.
+`execution.runtime-mode=streaming` and `scan.startup.mode=earliest-
+offset` are both present and correct; the job's own REST API status has
+independently confirmed `job-type: STREAMING` on every real run. The
+bounded-completion *signature* (E5) is still exactly right as a
+diagnosis - it's just not caused by a stray config value sitting in a
+file. `dump_logs_and_fail` is fixed (this commit) to read `/opt/flink/
+log/*.log` directly instead of `docker compose logs`, which two
+consecutive runs proved only shows console startup banners, never
+Flink's actual job-lifecycle logging. Next real run gets the actual
+evidence needed to diagnose from, not another guess.
+
+**Fourth addendum - the fixed path was itself another unverified guess,
+and it was wrong.** The next real run: `tail: cannot open '/opt/flink/
+log/*.log' for reading: No such file or directory`, from both
+containers. `/opt/flink/log/*.log` was written down as "the" Flink log
+location from general knowledge, not confirmed against this specific
+image - the exact mistake E6 exists to name, made while writing the fix
+for a *different* instance of the same mistake. Four consecutive real
+runs have now each cost a full CI cycle to a diagnostic gap rather than
+the underlying question: a swallowed print (#31), a 175-second-late
+dump (this entry's first addendum), the wrong capture command entirely
+(second addendum), and now a wrong path for the right command. Fixed by
+not guessing a second path: `find /opt/flink -iname '*.log*'` discovers
+whatever's actually there instead of asserting where it should be.
+
+**Fifth addendum - `find /opt/flink` found nothing, not a missing
+directory: zero matches.** No log files exist under `/opt/flink` at
+all, in either container. Rather than narrow the search to a sixth
+guessed directory, widened it two ways at once: a filesystem-wide `find
+/ -xdev -iname '*.log*'`, and Flink's own REST API log listing
+(`GET /jobmanager/logs`) - confirmed as a real, documented endpoint
+against Flink's own REST API reference before use, returning JSON
+metadata (name/size/mtime) for whatever Flink itself considers its log
+files, independent of where the container happens to route them. Between
+the two, this should either surface the actual location or establish
+directly that Flink genuinely isn't writing log files in this setup at
+all (plausible: many container-oriented Flink configurations route
+everything to console specifically for log-aggregation friendliness,
+which would mean the missing piece is *log level*, not log location -
+`docker compose logs`'s console output may simply be filtered below
+whatever level logs source/job completion).
+
+**Sixth addendum - found it, and it's not a script bug at all: the base
+infrastructure's logging has been broken since the conf mount was added
+(DEFENSE.md #13).** `GET /jobmanager/logs` returned `{"logs":[]}` -
+Flink's own accounting confirms zero log files exist, not a wrong
+search path. The filesystem-wide `find` turned up only OS package-
+manager logs (`/var/log/dpkg.log`, `apt/*.log`, ...), nothing Flink-
+related at all. And the *entire* `docker compose logs` output for both
+containers, across their whole lifetime (not a 200-line tail truncating
+something longer - this was everything either container had ever
+printed) was: two `config-parser-utils.sh: ... Permission denied` lines,
+a "Starting X Manager"/"Starting X as a console application" pair, and
+two `main ERROR Reconfiguration failed: No configuration found for
+'<hash>' at 'null' in 'null'` lines. That reconfiguration error is
+log4j2's own bootstrap failure message - a strong, checkable lead,
+followed up rather than dismissed as more noise.
+
+Root cause: `docker-compose.yml`'s `./config/flink:/opt/flink/conf` bind
+mount **replaces** the image's entire `conf/` directory rather than
+overlaying it - `config/flink/` has only ever contained `config.yaml`
+(added in DEFENSE.md #13), which means the image's own default
+`log4j-console.properties` - the file Flink's logging docs specifically
+name as the one used "if Job-/TaskManagers are run in the foreground"
+(exactly what "Starting standalonesession as a console application"
+describes) - has been absent from both containers since that mount was
+first added. Log4j2 falls back to essentially no meaningful output at
+all rather than the INFO-level console logging (and rolling file
+appender) that file configures. This has been true for every run since
+DEFENSE.md #13, including every smoke-test run on `main` - it never
+surfaced there only because nothing on `main` has ever needed to read
+detailed Flink logs to debug a failure; steps 4/5's own assertions
+(DEFENSE.md #14) never depended on log content.
+
+Fixed by adding `config/flink/log4j-console.properties` - a verbatim,
 unmodified copy of Flink 2.1's own default file (`apache/flink`,
-`release-2.1` branch), not a from-scratch or partial reconstruction -
-so the bind mount carries a complete conf directory instead of a
-partial one. Recorded in PROVENANCE.md/THIRD_PARTY_NOTICES.md as
-copied from upstream Apache Flink (Apache-2.0), a new provenance
-category distinct from `reference/`.
+`release-2.1` branch, `flink-dist/src/main/flink-bin/conf/
+log4j-console.properties`), not a from-scratch or partial
+reconstruction - so the bind mount carries a complete, working conf
+directory instead of a partial one. Recorded in PROVENANCE.md/
+THIRD_PARTY_NOTICES.md as copied from upstream Apache Flink (Apache-2.0),
+a new provenance category distinct from `reference/`.
 
-## 27. Kafka's advertised listener was never reachable from a host-side client
+**This explains why five consecutive diagnostic attempts found
+nothing** - not because each one looked in a slightly wrong place, but
+because the underlying logging was never actually configured to produce
+anything worth finding, in this container, since before step 6 existed.
+It does not yet explain the original bug (the job reaching `FINISHED`
+with zero records read) - that still needs an actual run with real
+logging in place. This fix is a precondition for diagnosing it, not the
+diagnosis itself. Base-infrastructure scope, like DEFENSE.md #25/#30:
+ported to `main` in its own commit, not left stranded on this branch.
 
-Found on `exactly-once-validation` (see that branch's DEFENSE.md #34)
-while building step 6's producer, `scripts/produce_events.py` - the
-first client in this project to connect to Kafka from the *host*
-rather than via `docker compose exec`. Ported here since any future
-host-side Kafka client (`ingestion/replay/replay_producer.py` on
-`nyc-tlc-replay`, for one, already needs this) would hit the identical
-problem.
+## 33. Root cause: `eos_kafka_source` was never a Kafka table - it was a silently-created, empty Iceberg table
 
-`docker-compose.yml`'s `kafka` service had exactly one data listener,
-advertised as `kafka:9092` - a hostname that only resolves inside the
-`weir-network` Docker network. A host-side client's initial bootstrap
-connection can succeed (the port is genuinely reachable via Docker's
-port mapping), but any metadata-driven reconnect - needed for real
-produce/consume traffic, not just the first handshake - tries to reach
-`kafka:9092` and fails outright from outside the network.
+The full diagnostic path, in order - what was ruled out, and how, before
+the actual cause was found. Recorded as its own entry because the path
+is the more valuable half of this: five real tooling gaps had to be
+found and fixed, in sequence, before the underlying bug was even
+*visible* to look at.
 
-Fixed with the standard Kafka Docker dual-listener pattern: a second
-listener, `EXTERNAL`, on its own port (`29092`, `KAFKA_EXTERNAL_PORT`),
-advertised as `localhost:${KAFKA_EXTERNAL_PORT}`. The existing
-`PLAINTEXT` listener, its port, and its `kafka:9092` advertised address
-are unchanged - every in-network client (Flink's Kafka SQL connector,
-`smoke_test.sh`'s `docker compose exec` calls) keeps using it exactly
-as before. No single listener can serve both audiences; two listeners
-is the actual fix, not a workaround around one.
+**What was ruled out, with evidence, before any log was read:**
+
+1. `scan.bounded.mode` leaking in from `smoke_step4.sql`'s diagnostic
+   (E6's exact concern) - grepped every relevant file by line number;
+   zero occurrences in `exactly_once_job.sql` or `config/flink/
+   config.yaml`, and `sql-client.sh -f` has no shared-session mechanism
+   between separate invocations to leak through anyway.
+2. `execution.runtime-mode`/`scan.startup.mode` misconfigured - both
+   confirmed correct (`streaming`/`earliest-offset`), and independently
+   corroborated by the job's own REST API status reporting `job-type:
+   STREAMING` on every real run, not `BATCH`.
+3. Stale committed consumer-group offsets (`properties.group.id` is
+   fixed, `weir-eos-verify`, across runs) - ruled out because
+   `scan.startup.mode='earliest-offset'` ignores committed offsets
+   entirely regardless of group history; this would only matter under
+   `group-offsets` mode, which isn't used here.
+4. Topic/partition mismatch - checked the actual substituted SQL in two
+   real runs' captured output: `'topic' = 'weir-eos-events'` in both,
+   exactly matching the producer and the topic-creation stage. No
+   sentinel-substitution bug, correct partition count.
+5. An empty topic at the moment the source first read from it (#32) -
+   plausible, tested directly by reordering the script to start the
+   producer first, confirmed running for 3 seconds before job
+   submission. The job still finished in ~3s reading zero records. This
+   directly disproved the leading hypothesis rather than just failing to
+   confirm it.
+
+**Five diagnostic-tooling gaps, found and fixed in sequence, before the
+real evidence was ever visible (all under #31/#32's addenda):** a
+diagnostic `print_raw` silently swallowed into a variable instead of
+printed; a 180s-late log dump that captured three minutes of unrelated
+noise instead of the actual failure moment; capturing `docker compose
+logs` when the relevant logging was never going to be there regardless
+of timing; a guessed log-file path (`/opt/flink/log/*.log`) that didn't
+exist; and, once `find` and Flink's own `/jobmanager/logs` REST endpoint
+proved *no log files existed anywhere*, the actual root cause of *that*:
+`docker-compose.yml`'s conf bind mount had been silently discarding the
+image's own `log4j-console.properties` since the mount was first added
+(DEFENSE.md #13/#26/#32's sixth addendum) - a base-infrastructure bug
+that predates step 6 entirely and had simply never been noticed.
+
+**With real logging finally in place, the actual evidence:**
+
+```
+INFO org.apache.flink.runtime.source.coordinator.SourceCoordinator - Starting split enumerator for source Source: eos_kafka_source[1].
+INFO org.apache.iceberg.flink.source.enumerator.AbstractIcebergEnumerator - Received request split event from subtask 0
+INFO org.apache.iceberg.flink.source.enumerator.AbstractIcebergEnumerator - Assigning splits for 1 awaiting readers
+INFO org.apache.iceberg.flink.source.enumerator.AbstractIcebergEnumerator - No more splits available for subtask 0
+INFO org.apache.iceberg.flink.sink.IcebergFilesCommitter - Skip commit for checkpoint 1 due to no data files or delete files.
+```
+
+The class actually enumerating splits for `eos_kafka_source` is
+`org.apache.iceberg.flink.source.enumerator.AbstractIcebergEnumerator` -
+Iceberg's own read-side enumerator. Not one single log line from any
+real Kafka connector class (`org.apache.flink.connector.kafka.*`,
+`org.apache.kafka.*`) appears anywhere in either container's full log,
+despite `flink-sql-connector-kafka-4.0.1-2.0.jar` being confirmed on the
+classpath. `eos_kafka_source` was never wired to Kafka at all.
+
+Confirmed directly from Iceberg 1.11.0's own source
+(`FlinkCatalog.createTable()`, `flink/v2.0` module):
+
+```java
+if (Objects.equals(
+        table.getOptions().get(FlinkCreateTableOptions.CONNECTOR_PROPS_KEY),
+        FlinkDynamicTableFactory.FACTORY_IDENTIFIER)
+    && table.getOptions().get(FlinkCreateTableOptions.SRC_CATALOG_PROPS_KEY) == null) {
+  throw new IllegalArgumentException(
+      "Cannot create the table with 'connector'='iceberg' table property in an iceberg catalog...");
+}
+Preconditions.checkArgument(table instanceof ResolvedCatalogTable, "table should be resolved");
+createIcebergTable(tablePath, (ResolvedCatalogTable) table, ignoreIfExists);
+```
+
+This method special-cases exactly one value: `'connector'='iceberg'`
+(rejected outright, unless it's a `CREATE TABLE LIKE`). For every other
+value - `'kafka'` included - execution falls straight through to
+`createIcebergTable(...)`, unconditionally, silently discarding the
+connector property and every Kafka-specific option along with it.
+`exactly_once_job.sql` created `eos_kafka_source` *after* `USE CATALOG
+weir_eos_catalog` - while an Iceberg catalog was active. The table this
+created was a real, empty Iceberg table that happened to be named
+`eos_kafka_source`, not a Kafka source under any name. Reading it
+correctly, deterministically returns zero rows and completes
+immediately - not a bug in the read, a correct read of an empty table.
+
+**Why `smoke_step4.sql` never hit this:** it creates `smoke_kafka_source`
+under Flink's default catalog - no `CREATE CATALOG`/`USE CATALOG`
+statement anywhere in that file at all. The two scripts' Kafka tables
+were never created under the same conditions; step 4 was never at risk.
+
+**Fixed** by creating `eos_kafka_source` first, before the Iceberg
+catalog is created or switched to, and referencing it by its
+fully-qualified name (`default_catalog.default_database.
+eos_kafka_source`) in the final `INSERT` once the current catalog has
+moved to `weir_eos_catalog` - Flink SQL resolves cross-catalog
+references this way natively. `scan.topic-partition-discovery.interval`
+from #32 is kept as a real hardening measure, not reverted, even though
+it was never the actual mechanism.
+
+**Confirmed working, first real run with the fix:** checkpoints
+incremented correctly and continuously (0 -> 1 -> 2 -> 3, not stuck),
+the TaskManager kill/recovery cycle worked end to end (job state
+RUNNING -> RESTARTING -> RUNNING, checkpoints resuming from 3 through
+6), and stages 1 through 9 all passed. This is the actual exactly-once
+mechanism (DEFENSE.md #19) working, for the first time in this
+project, against a genuinely continuous Kafka source.
+
+**A second, unrelated bug surfaced immediately after, at stage 10:** the
+producer crashed with an uncaught `KafkaTimeoutError: Failed to update
+metadata after 60.0 secs`, raised synchronously from `producer.send()`
+itself (not from a delivery callback - a different failure mode
+`produce_events.py` had no handling for at all). This is exactly what
+CLAUDE.md's V6 exists for: a failure during the TaskManager-kill window
+(which stresses the whole stack under CI's limited resources, not just
+Flink) has to be distinguishable and survivable, not a crash that reads
+as an unrelated script failure. Fixed by catching `KafkaError` around
+the `send()` call specifically (separate from the existing delivery-
+callback error handling), logging it as a `send_failures` entry
+distinct from `delivery_failures`, and continuing the loop rather than
+exiting - the run still reports the failure (and still exits non-zero
+overall), but it no longer masks whatever else was happening in the
+same window.
+
+## 34. Kafka's advertised listener was never reachable from a host-side client - two producer runs surfaced it two different ways
+
+With #33's root cause fixed, a fresh re-run failed again at stage 10 -
+same symptom class (a `KafkaTimeoutError`), but this time from the
+producer's very *first* send attempt (`evt-00000000`), not partway
+through a long-running window. `attempted=2, delivery_failures=0,
+send_failures=2` - the producer never successfully sent a single event
+this entire run, despite stages 4 through 9 (the actual Flink job) all
+passing again.
+
+Checked before assuming CI flakiness: `docker-compose.yml`'s `kafka`
+service has exactly one data listener, `KAFKA_ADVERTISED_LISTENERS:
+PLAINTEXT://kafka:9092` - advertised as the container's own hostname,
+which only resolves inside the `weir-network` Docker network.
+`scripts/produce_events.py` (and `ingestion/replay/replay_producer.py`
+on the `nyc-tlc-replay` branch) both run on the *host* (the CI runner
+itself, or a developer's machine), connecting via `localhost:
+${KAFKA_PORT}`. Kafka's protocol means an initial bootstrap connection
+can succeed superficially (the TCP port is genuinely reachable via
+Docker's port mapping), but any subsequent metadata-driven reconnect -
+which the client needs for real produce traffic, not just the first
+handshake - tries to reach `kafka:9092` and fails, since that hostname
+doesn't exist outside the Docker network at all.
+
+**Why nothing on `main` had ever hit this:** every existing Kafka
+client interaction in this project (`smoke_test.sh`'s `kafka-topics.sh`/
+`kafka-console-producer.sh`/`kafka-console-consumer.sh` calls) runs via
+`docker compose exec -T kafka ...` - *inside* the container, where
+`kafka:9092` (or even `localhost:9092`, since that's the container's own
+loopback) resolves fine. `produce_events.py` is the first client in this
+project to connect from the host directly, and the first to actually
+exercise this path.
+
+**Why it surfaced differently across two runs, rather than failing the
+same way every time:** likely dependent on exactly when the client's
+Kafka library needs a metadata-refresh-triggered reconnect versus being
+able to ride the initial bootstrap connection for a while first - not
+fully traced to the exact trigger, but the underlying reachability
+problem is the same either way and doesn't depend on timing to be real.
+
+**Fixed** with the standard Kafka Docker pattern: a second listener,
+`EXTERNAL`, on its own port (`29092`, mapped via a new
+`KAFKA_EXTERNAL_PORT` env var), advertised as `localhost:
+${KAFKA_EXTERNAL_PORT}` - reachable from the host, where `kafka:9092`
+never was. The existing `PLAINTEXT` listener, its port, and its
+`kafka:9092` advertised address are unchanged; every in-network client
+(Flink's Kafka SQL connector, `smoke_test.sh`'s `docker compose exec`
+calls) keeps using it exactly as before. No single listener can serve
+both audiences - a hostname a container-internal client can resolve is
+never one a host-side client can, and vice versa - two listeners are the
+actual fix, not a workaround around a single one. `produce_events.py`'s
+invocation in `scripts/verify_recovery.sh` now points at
+`KAFKA_EXTERNAL_PORT` instead of `KAFKA_PORT`.
+
+## 35. Java 21's module system blocks Kryo's checkpoint serialization - and it's the same root cause as the log4j bug (#26/#32)
+
+With #34's listener fix in place, the next real run got dramatically
+further: `read-records: 7531` on the source vertex - genuine Kafka data,
+finally, confirming #33's catalog fix works end to end - but then failed
+repeatedly at checkpointing, restarted three times (`fixed-delay.
+attempts: 3`), and reached `FAILED`.
+
+```
+java.lang.Exception: Could not perform checkpoint 4 for operator Source: eos_kafka_source[1] -> IcebergStreamWriter (2/2)#3.
+Caused by: com.esotericsoftware.kryo.KryoException: java.lang.reflect.InaccessibleObjectException: Unable to make field final byte[] java.nio.ByteBuffer.hb accessible: module java.base does not "opens java.nio" to unnamed module @51931956
+```
+
+Kryo (Flink's fallback serializer for state types without a dedicated
+native serializer) uses reflection to access private/final JDK fields -
+here, `java.nio.ByteBuffer`'s internal `hb` array, needed to serialize
+some part of the Kafka source's split/offset state for checkpointing.
+Since Java 17, the JDK's module system enforces "strong encapsulation"
+of `java.base` internals by default; without an explicit `--add-opens`
+JVM flag for the specific package, this kind of reflective access
+throws rather than warns. This project's Flink image is pinned to
+`flink:2.1.0-java21` - well past that threshold.
+
+Checked before assuming a from-scratch fix was needed: Flink's own
+stock `config.yaml` (`apache/flink`, `release-2.1` branch,
+`flink-dist/src/main/resources/config.yaml`) ships exactly this,
+labelled "required for Java 17 support":
+
+```yaml
+env:
+  java:
+    opts:
+      all: --add-exports=... --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.text=ALL-UNNAMED --add-opens=java.base/java.time=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED
+```
+
+`--add-opens=java.base/java.nio=ALL-UNNAMED` is right there in Flink's
+own default. This is the exact same root cause as #26/#32's sixth
+addendum: `docker-compose.yml`'s `./config/flink:/opt/flink/conf` bind
+mount **replaces** the image's entire conf directory, and
+`config/flink/config.yaml` - adapted from `reference/`'s pre-2.1,
+pre-Java21 `flink-conf.yaml` (PROVENANCE.md) - never carried these
+Java-17+-support defaults forward, because the file it was adapted from
+predates the Java version where they'd have mattered. The log4j bug and
+this one are the same class of mistake, found twice: a committed config
+file that unintentionally *replaces* upstream defaults instead of
+*extending* them, discovered only once something that needed the
+missing piece actually ran.
+
+**Fixed** by adding the identical `env.java.opts.all` block to
+`config/flink/config.yaml`, copied verbatim from Flink 2.1's own
+default (same source and verbatim-copy discipline as #26's
+`log4j-console.properties`) - not reconstructed or abbreviated.
+
+**Confirmed working: the first fully green run of the entire pipeline.**
+All 11 stages passed, including the TaskManager kill/recovery cycle.
+The actual `verify_exactly_once.py` report:
+
+```
+events_emitted: 9070, events_landed_total_rows: 9070, events_landed_distinct_keys: 9070
+duplicate_key_count: 0, gap_count: 0, unexpected_keys_not_in_emission_log: []
+```
+
+9070 events confirmed-delivered to Kafka, 9070 rows landed in Iceberg,
+zero duplicates, zero gaps - across a real SIGKILL of the TaskManager
+mid-write and a real recovery. This is genuine exactly-once, not an
+assumption: the checkpoint-barrier/commit-protocol explanation written
+in DEFENSE.md #19, before any of this code existed, actually held under
+a real failure injection.
+
+## 36. The "22 orphaned files" were a scope bug in the check, not a finding
+
+The same run's report also showed `orphaned_file_count: 22` - every one
+of them under `.../eos_events/metadata/` (`metadata.json` version
+files, manifest `.avro` files, manifest-list `snap-*.avro` files), not
+one single actual data file. Checked before reporting 22 orphans as a
+real result: `parse_referenced_files` reads `$all_data_files`, which -
+true to its name - only ever enumerates Iceberg's *data* layer (the
+Parquet files under `data/`). It was never going to list a
+`metadata.json` or a manifest file; those aren't data files, they're
+the structure Iceberg's own tree-walk passes *through* to reach data
+files, tracked and expired by Iceberg's own snapshot-management
+mechanisms entirely separately from "was this data file's commit ever
+finished."
+
+`verify_exactly_once.py`'s Filer walk (`--warehouse-path`) was scoped to
+the whole table directory - `data/` and `metadata/` both - then diffed
+against a reference set that only ever covers `data/`. Every metadata
+file was therefore guaranteed to look "orphaned," structurally, on every
+run, regardless of whether anything was actually wrong. Not a finding
+about this run's commit behavior - a scope mismatch in what was being
+compared to what.
+
+Fixed by scoping `--warehouse-path` to `eos_events/data` specifically,
+matching exactly what `$all_data_files` enumerates - an apples-to-apples
+comparison instead of table-directory-vs-data-layer. This is the same
+discipline as DEFENSE.md #14 (a check has to be verified to test what it
+claims to test) applied to this project's own verification tooling, not
+just the system under test - and it was caught by actually reading the
+"orphaned" list instead of trusting the count.
+
+## 37. Step 6, re-verified 5/5 - not trusted on the first green run
+
+Same discipline as smoke test step 5 (DEFENSE.md #24): a single pass
+means nothing on its own in this project's own history (#20/#21, #32's
+entire diagnostic odyssey). With #33 through #36's fixes all in place,
+the identical commit was re-run five times via `gh run rerun`, not
+trusted on the first green result. All five: pass, all 11 stages,
+`events_emitted == events_landed_total_rows` with `duplicate_key_count:
+0` and `gap_count: 0` every time, orphan count correctly scoped and
+consistent with expectations.
+
+The full path from a parked, unresolved bug to this point: #32's five
+diagnostic-tooling gaps (a swallowed print, a too-late log dump, the
+wrong capture command, a wrong guessed path, and finally the missing
+`log4j-console.properties` root cause), #33's actual root cause (the
+Iceberg catalog silently absorbing the Kafka table), #34's Kafka
+listener gap, #35's Java 21 module-encapsulation gap, and #36's own
+verification-script bug - each one found from real evidence, not
+guessed, each one fixed and re-verified before moving to the next. Step
+6 is genuinely, reproducibly green. This is the exactly-once mechanism
+DEFENSE.md #19 described, before any of this code existed, working
+under a real, injected TaskManager failure - not assumed, demonstrated.
