@@ -40,15 +40,28 @@ services:
       - weir
     ports:
       - "${KAFKA_PORT:-9092}:9092"
+      # Separate listener for host-side clients (scripts/produce_events.py,
+      # ingestion/replay/replay_producer.py) - see DEFENSE.md #34 for why
+      # a single listener can't serve both audiences. Kafka's own
+      # metadata response tells a client where to reconnect for actual
+      # produce/fetch traffic; a client outside the weir-network can't
+      # resolve "kafka" as a hostname at all.
+      - "${KAFKA_EXTERNAL_PORT:-29092}:29092"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       CLUSTER_ID: ${KAFKA_CLUSTER_ID:-4L6g3nShT-eMCtK--X86sw}
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,EXTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+      # PLAINTEXT (advertised as the container hostname) is what every
+      # in-network client uses (Flink's Kafka SQL connector, smoke_test.sh's
+      # `docker compose exec` calls) - unchanged. EXTERNAL (advertised as
+      # localhost:<mapped port>) exists only for host-side Python clients
+      # that connect from outside the weir-network entirely. Two listeners
+      # because no single advertised address is reachable from both.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:${KAFKA_EXTERNAL_PORT:-29092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_NUM_PARTITIONS: 3
       KAFKA_DEFAULT_REPLICATION_FACTOR: 1

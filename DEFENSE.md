@@ -1501,3 +1501,57 @@ distinct from `delivery_failures`, and continuing the loop rather than
 exiting - the run still reports the failure (and still exits non-zero
 overall), but it no longer masks whatever else was happening in the
 same window.
+
+## 34. Kafka's advertised listener was never reachable from a host-side client - two producer runs surfaced it two different ways
+
+With #33's root cause fixed, a fresh re-run failed again at stage 10 -
+same symptom class (a `KafkaTimeoutError`), but this time from the
+producer's very *first* send attempt (`evt-00000000`), not partway
+through a long-running window. `attempted=2, delivery_failures=0,
+send_failures=2` - the producer never successfully sent a single event
+this entire run, despite stages 4 through 9 (the actual Flink job) all
+passing again.
+
+Checked before assuming CI flakiness: `docker-compose.yml`'s `kafka`
+service has exactly one data listener, `KAFKA_ADVERTISED_LISTENERS:
+PLAINTEXT://kafka:9092` - advertised as the container's own hostname,
+which only resolves inside the `weir-network` Docker network.
+`scripts/produce_events.py` (and `ingestion/replay/replay_producer.py`
+on the `nyc-tlc-replay` branch) both run on the *host* (the CI runner
+itself, or a developer's machine), connecting via `localhost:
+${KAFKA_PORT}`. Kafka's protocol means an initial bootstrap connection
+can succeed superficially (the TCP port is genuinely reachable via
+Docker's port mapping), but any subsequent metadata-driven reconnect -
+which the client needs for real produce traffic, not just the first
+handshake - tries to reach `kafka:9092` and fails, since that hostname
+doesn't exist outside the Docker network at all.
+
+**Why nothing on `main` had ever hit this:** every existing Kafka
+client interaction in this project (`smoke_test.sh`'s `kafka-topics.sh`/
+`kafka-console-producer.sh`/`kafka-console-consumer.sh` calls) runs via
+`docker compose exec -T kafka ...` - *inside* the container, where
+`kafka:9092` (or even `localhost:9092`, since that's the container's own
+loopback) resolves fine. `produce_events.py` is the first client in this
+project to connect from the host directly, and the first to actually
+exercise this path.
+
+**Why it surfaced differently across two runs, rather than failing the
+same way every time:** likely dependent on exactly when the client's
+Kafka library needs a metadata-refresh-triggered reconnect versus being
+able to ride the initial bootstrap connection for a while first - not
+fully traced to the exact trigger, but the underlying reachability
+problem is the same either way and doesn't depend on timing to be real.
+
+**Fixed** with the standard Kafka Docker pattern: a second listener,
+`EXTERNAL`, on its own port (`29092`, mapped via a new
+`KAFKA_EXTERNAL_PORT` env var), advertised as `localhost:
+${KAFKA_EXTERNAL_PORT}` - reachable from the host, where `kafka:9092`
+never was. The existing `PLAINTEXT` listener, its port, and its
+`kafka:9092` advertised address are unchanged; every in-network client
+(Flink's Kafka SQL connector, `smoke_test.sh`'s `docker compose exec`
+calls) keeps using it exactly as before. No single listener can serve
+both audiences - a hostname a container-internal client can resolve is
+never one a host-side client can, and vice versa - two listeners are the
+actual fix, not a workaround around a single one. `produce_events.py`'s
+invocation in `scripts/verify_recovery.sh` now points at
+`KAFKA_EXTERNAL_PORT` instead of `KAFKA_PORT`.
