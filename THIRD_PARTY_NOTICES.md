@@ -40,3 +40,20 @@ SOFTWARE.
 Note: streaming-lakehouse-lab's own README states "Apache License 2.0," which
 contradicts its LICENSE file (MIT). The LICENSE file is the operative grant;
 this repository relies on it, not the README.
+
+## Apache Flink
+
+Source: https://github.com/apache/flink (release-2.1 branch)
+License: Apache License 2.0
+Copied verbatim, unmodified:
+- config/flink/log4j-console.properties
+  (`flink-dist/src/main/flink-bin/conf/log4j-console.properties`)
+- config/flink/config.yaml's `env.java.opts.all` line
+  (`flink-dist/src/main/resources/config.yaml`)
+
+The file's own Apache-2.0 license header is preserved unmodified as part of
+the copy itself, satisfying License section 4(b)/4(c) (state changes made -
+none were - and retain attribution notices) directly in the copied file. No
+separate project-level NOTICE-file content from `apache/flink` applies
+specifically to this one configuration file beyond the standard ASF
+boilerplate already reproduced in its header.

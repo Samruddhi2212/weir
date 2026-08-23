@@ -54,6 +54,9 @@ data/
 # ============================================================
 # Runtime artifacts (emission logs, producer logs, JSON reports) from
 # validation/replay scripts - regenerated per run, never committed.
+# scripts/verify_recovery.sh's emission log/producer log and
+# verify_exactly_once.py's JSON report are the step-6 example; uploaded
+# as CI artifacts instead (see .github/workflows/exactly-once.yml).
 # ============================================================
 artifacts/
 
