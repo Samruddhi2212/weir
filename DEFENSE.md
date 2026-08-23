@@ -1861,3 +1861,13 @@ default) or `json` as `--format` values, not an arbitrary Go-template
 field. Fixed by reusing `smoke_test.sh`'s already-proven pattern (grep
 the plain-text output for this service's line and the literal
 `(healthy)` substring) instead of inventing a second, unverified one.
+
+**Verified 5/5, not trusted on one pass - per CLAUDE.md V4.** All three
+checks passed clean on the first real run, then re-run four more times
+via `gh run rerun`: 5/5. Real measured numbers, not illustrative: 500/500
+landed timestamps exactly matched source data on every run; the
+compression-ratio check measured `actual_ratio=59.96` against a
+configured `speed_factor=60.0` (0.1% relative error, well inside the
+25% tolerance) on the first run, similarly tight on the others; the
+resume-seam check landed exactly 500/500 in each half with zero overlap
+and zero gaps every time. Part 2.1 is genuinely done, not just built.
