@@ -1678,3 +1678,12 @@ guessed, each one fixed and re-verified before moving to the next. Step
 6 is genuinely, reproducibly green. This is the exactly-once mechanism
 DEFENSE.md #19 described, before any of this code existed, working
 under a real, injected TaskManager failure - not assumed, demonstrated.
+
+**Merged to `main`, and re-verified there specifically, not assumed to
+compose.** `exactly-once-validation` touched two pieces of shared base
+infrastructure also used by the ordinary smoke test - the Kafka
+listener config (#27/#34) and Flink's `env.java.opts.all` (#35) - and
+neither had been exercised together with the smoke test path before.
+Per CLAUDE.md's V4, ran `scripts/smoke_test.sh` via CI 5 times on the
+merged `main`, not just once: 5/5 pass. The two changes compose
+correctly; nothing about combining them broke steps 2-5.
