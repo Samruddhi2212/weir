@@ -40,7 +40,10 @@ set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 FLINK_UI_PORT="${FLINK_JOBMANAGER_UI_PORT:-8081}"
-KAFKA_PORT="${KAFKA_PORT:-9092}"
+# NOT KAFKA_PORT (9092, PLAINTEXT listener advertised as kafka:9092,
+# unreachable from outside the weir-network) - the producer below runs
+# on the host, so it needs the EXTERNAL listener. See DEFENSE.md #34.
+KAFKA_EXTERNAL_PORT="${KAFKA_EXTERNAL_PORT:-29092}"
 WEIR_EOS_TOPIC="${WEIR_EOS_TOPIC:-weir-eos-events}"
 WEIR_EOS_CHECKPOINT_INTERVAL="${WEIR_EOS_CHECKPOINT_INTERVAL:-10s}"
 WEIR_EOS_EVENTS_PER_SEC="${WEIR_EOS_EVENTS_PER_SEC:-100}"
@@ -205,7 +208,7 @@ echo "PASS: stage 2 - topic created"
 echo ""
 echo "=== Stage 3: start producer (~${WEIR_EOS_EVENTS_PER_SEC}/sec) ==="
 "$PYTHON_BIN" scripts/produce_events.py \
-  --bootstrap-server "localhost:${KAFKA_PORT}" \
+  --bootstrap-server "localhost:${KAFKA_EXTERNAL_PORT}" \
   --topic "$WEIR_EOS_TOPIC" \
   --emission-log "$EMISSION_LOG" \
   --rate "$WEIR_EOS_EVENTS_PER_SEC" \
