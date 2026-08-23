@@ -1935,13 +1935,49 @@ with its actual drop rate, not treated as a settled choice.** The
 script reports the full distribution (all percentiles, max) and
 recommends bounding at p99 specifically because it's the standard
 starting point for "cover the overwhelming majority, treat the
-remainder as a real, acknowledged tradeoff" - not p999 (excellent
-coverage, but on a `--shuffle-window`-bounded distribution the tail
-between p99 and p999 is compressed anyway, so the latency cost of
-chasing it further is real while the coverage gain is small) and not
-p50/p95 (cheap in latency, but a materially larger drop rate on a
-distribution this bounded). The *reported* drop-rate-at-p99 is the
-actual number to make the call from, not the recommendation by itself
-- this project's own rule (CLAUDE.md hard rule 1) is that no fabricated
-number substitutes for a measured one, and that applies exactly as much
-to this recommendation as to anything benchmarks/ produces.
+remainder as a real, acknowledged tradeoff" - not p999 (see the
+correction below for why, written after this paragraph was found
+wrong) and not p50/p95 (cheap in latency, but a materially larger drop
+rate on a distribution this bounded). The *reported* drop-rate-at-p99
+is the actual number to make the call from, not the recommendation by
+itself - this project's own rule (CLAUDE.md hard rule 1) is that no
+fabricated number substitutes for a measured one, and that applies
+exactly as much to this recommendation as to anything benchmarks/
+produces.
+
+**Correction, after running the CI-canonical measurement.** The
+paragraph above originally justified skipping p999 by claiming "the
+tail between p99 and p999 is compressed anyway" - written
+speculatively, before any measurement existed, since per D1 the design
+has to be written before the code. That claim was never re-checked
+against real output before being left in place, which is exactly the
+kind of unearned, unverified number CLAUDE.md hard rule 1 exists to
+catch - a design rationale is not exempt from it just because it isn't
+a benchmark metric. Running `scripts/measure_lateness.py` through live
+Kafka (N=2000, `--shuffle-window 50`, `--shuffle-seed 42`, the "Measure
+lateness distribution (Part 2.2)" step of `replay-verify.yml`, run
+32672957098) against the real January 2025 dataset produced:
+
+```
+p50=12.0s  p95=41.0s  p99=270.0s  p999=11309.0s  max=11601.0s
+```
+
+The p99-p999 gap is ~42x, not compressed - the original claim was
+wrong. What's actually happening is a property of the window-shuffle
+model itself, not the pacing formula: `--shuffle-window` bounds a fixed
+*row count* per window, not a fixed *event-time span*. NYC taxi pickup
+density varies enormously by hour (the rush-hour-bursts-vs-overnight-
+lulls shape `replay_producer.py`'s own docstring names, DEFENSE.md
+#38) - a 50-row window during a dense period spans seconds of event
+time, while the same 50-row window overnight can span many minutes.
+The three events landing in the 10440.9-11601.0s histogram bucket are
+real sparse-period windows, not a modeling artifact.
+
+This doesn't change the p99 recommendation, but it changes *why*: p99
+is preferred not because the tail past it is cheap or compressed, but
+because that tail is density-driven and effectively open-ended -
+chasing p999 would mean accepting an operationally unacceptable
+watermark bound (11309s, ~3.1 hours) for 0.1% of events, a cost that
+has nothing to do with the shuffle bound `W` and everything to do with
+how unevenly real trips arrive over a day. At the measured p99 bound
+(270s, ~4.5 min), 20/2000 events (1.0%) would be dropped as too-late.
