@@ -1608,3 +1608,50 @@ missing piece actually ran.
 `config/flink/config.yaml`, copied verbatim from Flink 2.1's own
 default (same source and verbatim-copy discipline as #26's
 `log4j-console.properties`) - not reconstructed or abbreviated.
+
+**Confirmed working: the first fully green run of the entire pipeline.**
+All 11 stages passed, including the TaskManager kill/recovery cycle.
+The actual `verify_exactly_once.py` report:
+
+```
+events_emitted: 9070, events_landed_total_rows: 9070, events_landed_distinct_keys: 9070
+duplicate_key_count: 0, gap_count: 0, unexpected_keys_not_in_emission_log: []
+```
+
+9070 events confirmed-delivered to Kafka, 9070 rows landed in Iceberg,
+zero duplicates, zero gaps - across a real SIGKILL of the TaskManager
+mid-write and a real recovery. This is genuine exactly-once, not an
+assumption: the checkpoint-barrier/commit-protocol explanation written
+in DEFENSE.md #19, before any of this code existed, actually held under
+a real failure injection.
+
+## 36. The "22 orphaned files" were a scope bug in the check, not a finding
+
+The same run's report also showed `orphaned_file_count: 22` - every one
+of them under `.../eos_events/metadata/` (`metadata.json` version
+files, manifest `.avro` files, manifest-list `snap-*.avro` files), not
+one single actual data file. Checked before reporting 22 orphans as a
+real result: `parse_referenced_files` reads `$all_data_files`, which -
+true to its name - only ever enumerates Iceberg's *data* layer (the
+Parquet files under `data/`). It was never going to list a
+`metadata.json` or a manifest file; those aren't data files, they're
+the structure Iceberg's own tree-walk passes *through* to reach data
+files, tracked and expired by Iceberg's own snapshot-management
+mechanisms entirely separately from "was this data file's commit ever
+finished."
+
+`verify_exactly_once.py`'s Filer walk (`--warehouse-path`) was scoped to
+the whole table directory - `data/` and `metadata/` both - then diffed
+against a reference set that only ever covers `data/`. Every metadata
+file was therefore guaranteed to look "orphaned," structurally, on every
+run, regardless of whether anything was actually wrong. Not a finding
+about this run's commit behavior - a scope mismatch in what was being
+compared to what.
+
+Fixed by scoping `--warehouse-path` to `eos_events/data` specifically,
+matching exactly what `$all_data_files` enumerates - an apples-to-apples
+comparison instead of table-directory-vs-data-layer. This is the same
+discipline as DEFENSE.md #14 (a check has to be verified to test what it
+claims to test) applied to this project's own verification tooling, not
+just the system under test - and it was caught by actually reading the
+"orphaned" list instead of trusting the count.

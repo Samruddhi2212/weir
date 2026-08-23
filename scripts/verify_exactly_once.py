@@ -208,8 +208,16 @@ def main():
     parser.add_argument("--filer-host", default="localhost")
     parser.add_argument("--filer-port", type=int, default=int(os.environ.get("SEAWEEDFS_FILER_PORT", "8888")))
     parser.add_argument(
-        "--warehouse-path", default="/buckets/weir-warehouse/warehouse/eos_test/eos_events",
-        help="Filer-namespace path to the eos_events table's warehouse directory",
+        "--warehouse-path", default="/buckets/weir-warehouse/warehouse/eos_test/eos_events/data",
+        # Scoped to the data/ subdirectory specifically, not the whole
+        # table directory - $all_data_files (parse_referenced_files)
+        # only ever enumerates the data layer, never Iceberg's own
+        # metadata.json/manifest/manifest-list files under metadata/.
+        # Walking the whole table directory and diffing against a
+        # data-only reference set made every metadata file look
+        # "orphaned" in this script's first real run - not a finding,
+        # a scope bug in the comparison itself. See DEFENSE.md #36.
+        help="Filer-namespace path to the eos_events table's data/ directory (not the whole table dir)",
     )
     parser.add_argument("--sql-timeout", type=int, default=90)
     parser.add_argument("--report-json", default=None, help="optional path to also write the report as JSON")
