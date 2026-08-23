@@ -1775,3 +1775,89 @@ emission log the way step 6 does, but it still shouldn't misreport what
 reporting both, and failing loudly if they don't match after `flush()` -
 rather than trusting a count that was never actually checked against the
 broker's own acknowledgment.
+
+## 39. Part 2.1 completion: wiring the replay producer to live Kafka and verifying it for real
+
+Written before any of this code, per the standing rule. Four things
+need proving, not assuming: timestamps survive the round trip, the
+compression ratio is what it claims to be, resuming from an event-time
+offset is gap-free and duplicate-free at the seam, and (re-audited,
+this time against the actual current file rather than assumed) whether
+V5 still holds after this session's earlier fix.
+
+**V5 re-audit, this time - result: compliant, not a violation.**
+Re-read `replay_producer.py` line by line against V5 rather than
+trusting the earlier fix (DEFENSE.md #38's V5 audit) blindly.
+`confirmed` increments only inside `on_success`, which only fires from
+a delivery callback; the `attempted % 1000` progress line and the final
+summary both say "attempted", never "sent", for the send-call count
+specifically; and `main()` still hard-fails if `confirmed != attempted`
+after `flush()`. No send-call-as-truth logging found anywhere in the
+current file. Confirmed compliant, not assumed.
+
+**Emission log: reversing #38's own "doesn't need one" call.** #38
+reasoned this component didn't need step 6's persisted emission log
+since it isn't validating exactly-once semantics. That reasoning held
+for its original scope; it doesn't hold for verifying timestamp
+integrity or a resume seam, both of which need a trustworthy record of
+*which* rows were confirmed-sent and *what timestamp* each one carried,
+across two separate process invocations for the resume case
+specifically. Adding `--emission-log` (optional, off by default),
+writing exactly what `produce_events.py` already writes on confirmed
+delivery - not new design, reuse of an already-proven pattern once the
+actual need for it showed up.
+
+**Resume seam: verified the sort's determinism before designing around
+it, not assumed.** A tie-safe resume (`--resume-after-timestamp T
+--resume-skip-ties K`: skip every row with `pickup < T`, then skip the
+first `K` rows with `pickup == T`) is only gap-free and duplicate-free
+across two separate runs if the *same* input file sorted the *same* way
+produces the *same* row order for tied timestamps every time - taxi
+pickup times are recorded to the second, and dense periods genuinely
+have multiple trips per second, so ties at an arbitrary resume boundary
+are a real scenario, not a hypothetical. Checked before relying on it:
+`pyarrow.Table.sort_by()` is documented as a stable sort (ties keep
+their original relative order), and `pq.read_table()` on the same file
+always reads rows in the same on-disk physical order - stable sort of a
+deterministic input order is deterministic output order, ties included,
+across separate process invocations. No compound tie-breaking sort key
+needed; the existing `sort_by(PICKUP_COLUMN)` is already safe for this,
+confirmed rather than assumed.
+
+**Time-compression ratio test: isolated from the cap on purpose, not
+by accident.** `--max-inter-arrival-sleep` caps any single gap's
+replayed delay (DEFENSE.md #38) - correct production behavior, but it
+would corrupt a naive `event_time_span / wall_clock_elapsed ≈
+speed_factor` check if any gap in the tested sample actually hit the
+cap, since a capped gap contributes less wall-clock time than the ratio
+predicts. Rather than reimplementing the capped-sum formula a second
+time inside the test (a redundant parallel implementation that could
+itself be wrong, testing itself more than the system), the verification
+run uses a deliberately large `--max-inter-arrival-sleep` (effectively
+disabling the cap for this one run) so the simple ratio check is
+exactly correct for what it's checking, with the cap's own behavior
+untested here on purpose - that's a different property, already
+covered by #38's own reasoning for why the cap exists at all.
+
+**Wall-clock ground truth: the broker's own message timestamps, not the
+producer's.** Same V5 principle applied to a new measurement: elapsed
+wall-clock time for the ratio check is computed from the *consumed*
+messages' broker-assigned timestamps (`ConsumerRecord.timestamp`, when
+Kafka actually received each message), not from timers inside
+`replay_producer.py` itself. The producer's own clock is exactly what's
+under test here - measuring it with itself would be circular.
+
+**Live-Kafka wiring: Kafka only, no Flink/Iceberg.** This work has only
+ever needed Kafka (DEFENSE.md #38's own framing) - the verification
+workflow brings up `docker compose up -d kafka` alone, not the full
+stack, keeping this test fast and free of dependencies step 6 already
+covers elsewhere.
+
+**Caught before shipping, not in a real CI run:** the workflow's first
+draft waited for Kafka to become healthy via `docker compose ps kafka
+--format '{{.Health}}'` - checked against `docker compose ps`'s own
+documentation before trusting it, which only supports `pretty` (the
+default) or `json` as `--format` values, not an arbitrary Go-template
+field. Fixed by reusing `smoke_test.sh`'s already-proven pattern (grep
+the plain-text output for this service's line and the literal
+`(healthy)` substring) instead of inventing a second, unverified one.
