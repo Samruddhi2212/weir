@@ -46,12 +46,18 @@ docker-compose.override.yml
 *.duckdb
 
 # ============================================================
-# Step 6 exactly-once validation runtime output
+# Downloaded raw datasets (NYC TLC trip data, etc.) - large binary
+# Parquet files, re-downloadable from the source, never committed.
 # ============================================================
-# scripts/verify_recovery.sh's emission log, producer log, and
-# verify_exactly_once.py's JSON report - all generated at run time, none
-# of it reviewable source. Uploaded as CI artifacts instead (see
-# .github/workflows/exactly-once.yml), not committed.
+data/
+
+# ============================================================
+# Runtime artifacts (emission logs, producer logs, JSON reports) from
+# validation/replay scripts - regenerated per run, never committed.
+# scripts/verify_recovery.sh's emission log/producer log and
+# verify_exactly_once.py's JSON report are the step-6 example; uploaded
+# as CI artifacts instead (see .github/workflows/exactly-once.yml).
+# ============================================================
 artifacts/
 
 # ============================================================
