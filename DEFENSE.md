@@ -1981,3 +1981,128 @@ watermark bound (11309s, ~3.1 hours) for 0.1% of events, a cost that
 has nothing to do with the shuffle bound `W` and everything to do with
 how unevenly real trips arrive over a day. At the measured p99 bound
 (270s, ~4.5 min), 20/2000 events (1.0%) would be dropped as too-late.
+
+## 41. Part 3.1: the metrics store - design, before any code
+
+Written before the Flink metrics job or the Postgres schema, per D1.
+Designed against what `yellow_tripdata_2025-01.parquet` actually
+contains, not against an assumed-clean dataset - inspected directly
+(`pyarrow`, not TLC's docs) before writing anything below:
+
+- **~15.5% nulls**, concentrated in exactly five columns
+  (`passenger_count`, `RatecodeID`, `store_and_fwd_flag`,
+  `congestion_surcharge`, `Airport_fee`) - correlated with `VendorID`
+  but not perfectly (VendorIDs 1, 2, and 6 all contribute rows to it,
+  not one single vendor that "doesn't report these fields").
+- **Negative dollar amounts** on `fare_amount`, `tip_amount`,
+  `tolls_amount`, `total_amount` (down to -$901) - these are real
+  refund/correction rows in TLC data, not a parse error, so a metrics
+  store that flags them has to count them, not reject them.
+- **Extreme outliers**: `trip_distance` max = 276,423.57 (miles,
+  presumably - clearly wrong either way), `fare_amount` max =
+  $863,372.12.
+- **124 negative-duration trips** (`tpep_dropoff_datetime` before
+  `tpep_pickup_datetime`) and **1,927 zero-duration trips** - neither
+  column is null-checked against the other by TLC before publishing.
+- **22 rows with `tpep_pickup_datetime` outside the file's nominal
+  month** - TLC's monthly files routinely leak a handful of rows from
+  adjacent months; this has no equivalent concept in a live Kafka
+  stream (there's no file-month boundary), so it's reframed below as
+  a watermark-lateness metric instead of a standalone one.
+
+**Decision 1: metrics computed inline in the Flink job, not by a
+separate batch reader over Iceberg (your call).** The alternative -
+a standalone job periodically querying Iceberg after ingestion - was
+real and stated before this was decided: it would decouple metrics
+logic from the streaming pipeline (change what's measured without
+redeploying the ingestion job) at the cost of latency (metrics lag
+ingestion by however often that job runs) and a second read pass over
+the same data. Inline wins because CLAUDE.md already commits to
+instrumenting detection latency starting this sprint - a metrics path
+with a built-in lag before it even reaches the detector would
+undercut the number this project exists to publish.
+
+**Decision 2: fixed event-time tumbling windows, not fixed row-count
+batches (your call).** The alternative was real and already
+demonstrated to have a real cost: DEFENSE.md #40 measured that a
+fixed *row-count* window (the shuffle window) spans wildly different
+event-time durations depending on local pickup density - the same
+problem would recur here if metrics windows were row-count-based,
+making "what happened at 3am" unanswerable without a lookup. Fixed
+time windows keep the window key directly meaningful. Window size:
+**1 minute of event time**, a parameter (not hardcoded), chosen as
+fine-grained enough to localize an incident to roughly the minute
+(the "localizes" half of this project's own mission statement) while
+still holding enough rows per window to make a rate-based metric
+(null %, negative %) statistically meaningful outside of the sparsest
+overnight windows. Not claimed as tuned or final - like the p99
+bound in #40, it's a stated default subject to revision once the
+detection engine is actually run against it.
+
+**Decision 3: narrow (long) schema in Postgres, not one wide row per
+window.** Real alternative: a wide table (one column per metric per
+source column) would need a migration every time a new metric or
+source column is added, and would already need on the order of 20
+columns x 3-4 metrics = 60-80 columns for this dataset alone. A
+narrow table - one row per `(window_start, window_end, column_name,
+metric_name, metric_value)` - trades that off against needing a
+`GROUP BY`/join to reconstruct a window's full picture, in exchange
+for adding a new metric or column being a data-insert, not a schema
+migration. Two tables, not one:
+  - `window_metrics` (one row per window): `window_start`,
+    `window_end`, `row_count`, `late_event_count`,
+    `lateness_p50_seconds`, `lateness_p99_seconds`,
+    `lateness_max_seconds` - the watermark-lateness numbers absorb
+    the "22 rows outside the nominal month" finding above: in a live
+    stream that's not a month-boundary concept, it's just lateness
+    beyond whatever bound #40 recommends, and it's already being
+    measured for exactly that reason.
+  - `column_metrics` (one row per window per source column per
+    metric): `window_start`, `window_end`, `column_name`,
+    `metric_name`, `metric_value`. Indexed on `(column_name,
+    metric_name, window_start)` - the access pattern a detector
+    needs is "give me column X's null-rate time series," not "give
+    me everything about window Y."
+
+**What gets computed per column, and why each one is grounded in a
+real finding above, not a guess:**
+  - `null_count` - every column, all five null-heavy columns found
+    above are covered by this alone.
+  - `distinct_count` - categorical columns only (`VendorID`,
+    `RatecodeID`, `payment_type`, `PULocationID`, `DOLocationID`,
+    `store_and_fwd_flag`) - a cardinality jump (e.g. a new
+    `PULocationID` appearing) is itself a detectable incident
+    signature, independent of any rate.
+  - `negative_count` - every numeric column where negative is
+    possible in the schema but domain-nonsensical on its own
+    (`fare_amount`, `tip_amount`, `tolls_amount`, `total_amount`,
+    `trip_distance`, `passenger_count`) - a pure count against the
+    fixed threshold zero, not a judgment call about what's an
+    outlier, so it needs no invented bound (CLAUDE.md hard rule 1).
+  - `min`, `max`, `mean` - every numeric column. Deliberately NOT
+    accompanied by a stored "is this an outlier" flag or bound in
+    this table - classifying $863,372.12 as anomalous requires a
+    baseline to compare against (a prior window, or a
+    calibration pass), which is the detection engine's job (not yet
+    built), not something for the metrics store to hardcode a
+    magic threshold for. The metrics store's job is descriptive
+    statistics; anomaly classification is a separate, later
+    component that reads this table, deliberately kept out of it so
+    this component doesn't quietly become both.
+  - `negative_duration_count`, `zero_duration_count` - derived from
+    `tpep_dropoff_datetime - tpep_pickup_datetime`, not a raw column;
+    stored as `column_name = 'trip_duration'` rows in the same
+    `column_metrics` table rather than a separate table, since
+    they're the same shape of fact (a count against a fixed
+    threshold) as `negative_count` above.
+
+Rates (null %, negative %, etc.) are deliberately NOT stored
+pre-divided - `column_metrics.metric_value` holds the raw count, and
+`window_metrics.row_count` holds the denominator; a rate is computed
+at query time via a join. Storing a pre-divided rate would be a
+second, derived copy of the same fact with its own rounding, and
+CLAUDE.md's discipline throughout this project has been to keep
+exactly one stored ground truth per fact (the broker's delivery
+callback, not "we called send()"; the running-max lateness
+definition, not a second wall-clock one) - this is the same principle
+applied to the metrics store.
