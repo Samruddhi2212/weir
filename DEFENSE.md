@@ -1871,3 +1871,238 @@ configured `speed_factor=60.0` (0.1% relative error, well inside the
 25% tolerance) on the first run, similarly tight on the others; the
 resume-seam check landed exactly 500/500 in each half with zero overlap
 and zero gaps every time. Part 2.1 is genuinely done, not just built.
+
+## 40. Part 2.2: measuring real lateness, and why the naive replay can't produce any
+
+Written before `scripts/measure_lateness.py` or the shuffle feature it
+depends on, per D1. The question this has to answer isn't "does the
+code run" - it's "is the number it produces actually a lateness
+distribution, or an artifact of how the test was built."
+
+**Why naive replay measures nothing.** The source Parquet is sorted by
+`tpep_pickup_datetime`, and `replay_producer.py` sends in that exact
+order - every event's arrival relative order matches its event-time
+order perfectly, by construction. Measuring "lateness" against that
+replay would report ~0 for everything, correctly reflecting the test
+setup and telling us nothing about how a watermark should actually be
+tuned for disorder that hasn't been reproduced yet.
+
+**Out-of-order model: bounded window shuffle (your choice from the
+three options presented).** Partition the chronologically-sorted rows
+into fixed, non-overlapping windows of size `--shuffle-window W`, and
+shuffle *only the send order* within each window - `event_ts` itself is
+never touched, only which row goes out at which position. Deterministic
+worst case by construction: an event can never actually be more than
+`W-1` positions out of true order, so the resulting lateness
+distribution has a hard ceiling implied directly by `W`, not an
+open-ended tail. That's the tradeoff already named when this model was
+chosen over the other two: clean and parameterized, at the cost of a
+uniform-ish shape within the bound rather than a realistic long tail.
+Reproducible by default via a fixed `--shuffle-seed` (documented, not
+hidden) - a measurement meant to justify a real config change has to be
+re-derivable, not a one-off random result nobody can reproduce.
+
+**Pacing stays tied to true chronological order, not shuffled order.**
+Each row's own wall-clock sleep (the existing `min(delta/speed_factor,
+max_sleep)` formula, DEFENSE.md #38) is computed from its real
+chronological predecessor's timestamp, *before* the window shuffle is
+applied to decide send order. Windows are non-overlapping and shuffling
+only permutes within one, so the sum of sleeps per window - and
+therefore total replay duration and the compression ratio verified in
+#39 - is unchanged by turning shuffling on. Only the local arrival
+order moves; the overall pacing envelope doesn't.
+
+**Lateness definition: running-max-based, not wall-clock/broker-
+timestamp-based.** For each event, in the order it actually arrives:
+`lateness = (running_max_event_time_seen_so_far - this_event's_event_ts)`,
+then update the running max. This is the standard operational
+definition streaming watermarks are actually tuned against - "how far
+behind the newest timestamp seen so far is this one" - not how it
+compares to some external wall clock. Broker/consume timestamps are
+deliberately not used here (unlike DEFENSE.md #39's ratio test, where
+they were the right ground truth for a different question): the
+disorder under test is the *synthetic shuffle*, and measuring against
+real infra timing would conflate that with unrelated network/consumer
+jitter, muddying the one thing this measurement exists to characterize.
+
+**Percentiles: Python's stdlib, no new dependency.**
+`statistics.quantiles()` (3.8+) computes p50/p95/p99/p999 and the
+histogram bucketing directly - `numpy`/`scipy` were not needed and
+weren't asked about as a result.
+
+**Watermark bound proposal: p99 as the default recommendation, stated
+with its actual drop rate, not treated as a settled choice.** The
+script reports the full distribution (all percentiles, max) and
+recommends bounding at p99 specifically because it's the standard
+starting point for "cover the overwhelming majority, treat the
+remainder as a real, acknowledged tradeoff" - not p999 (see the
+correction below for why, written after this paragraph was found
+wrong) and not p50/p95 (cheap in latency, but a materially larger drop
+rate on a distribution this bounded). The *reported* drop-rate-at-p99
+is the actual number to make the call from, not the recommendation by
+itself - this project's own rule (CLAUDE.md hard rule 1) is that no
+fabricated number substitutes for a measured one, and that applies
+exactly as much to this recommendation as to anything benchmarks/
+produces.
+
+**Correction, after running the CI-canonical measurement.** The
+paragraph above originally justified skipping p999 by claiming "the
+tail between p99 and p999 is compressed anyway" - written
+speculatively, before any measurement existed, since per D1 the design
+has to be written before the code. That claim was never re-checked
+against real output before being left in place, which is exactly the
+kind of unearned, unverified number CLAUDE.md hard rule 1 exists to
+catch - a design rationale is not exempt from it just because it isn't
+a benchmark metric. Running `scripts/measure_lateness.py` through live
+Kafka (N=2000, `--shuffle-window 50`, `--shuffle-seed 42`, the "Measure
+lateness distribution (Part 2.2)" step of `replay-verify.yml`, run
+32672957098) against the real January 2025 dataset produced:
+
+```
+p50=12.0s  p95=41.0s  p99=270.0s  p999=11309.0s  max=11601.0s
+```
+
+The p99-p999 gap is ~42x, not compressed - the original claim was
+wrong. What's actually happening is a property of the window-shuffle
+model itself, not the pacing formula: `--shuffle-window` bounds a fixed
+*row count* per window, not a fixed *event-time span*. NYC taxi pickup
+density varies enormously by hour (the rush-hour-bursts-vs-overnight-
+lulls shape `replay_producer.py`'s own docstring names, DEFENSE.md
+#38) - a 50-row window during a dense period spans seconds of event
+time, while the same 50-row window overnight can span many minutes.
+The three events landing in the 10440.9-11601.0s histogram bucket are
+real sparse-period windows, not a modeling artifact.
+
+This doesn't change the p99 recommendation, but it changes *why*: p99
+is preferred not because the tail past it is cheap or compressed, but
+because that tail is density-driven and effectively open-ended -
+chasing p999 would mean accepting an operationally unacceptable
+watermark bound (11309s, ~3.1 hours) for 0.1% of events, a cost that
+has nothing to do with the shuffle bound `W` and everything to do with
+how unevenly real trips arrive over a day. At the measured p99 bound
+(270s, ~4.5 min), 20/2000 events (1.0%) would be dropped as too-late.
+
+## 41. Part 3.1: the metrics store - design, before any code
+
+Written before the Flink metrics job or the Postgres schema, per D1.
+Designed against what `yellow_tripdata_2025-01.parquet` actually
+contains, not against an assumed-clean dataset - inspected directly
+(`pyarrow`, not TLC's docs) before writing anything below:
+
+- **~15.5% nulls**, concentrated in exactly five columns
+  (`passenger_count`, `RatecodeID`, `store_and_fwd_flag`,
+  `congestion_surcharge`, `Airport_fee`) - correlated with `VendorID`
+  but not perfectly (VendorIDs 1, 2, and 6 all contribute rows to it,
+  not one single vendor that "doesn't report these fields").
+- **Negative dollar amounts** on `fare_amount`, `tip_amount`,
+  `tolls_amount`, `total_amount` (down to -$901) - these are real
+  refund/correction rows in TLC data, not a parse error, so a metrics
+  store that flags them has to count them, not reject them.
+- **Extreme outliers**: `trip_distance` max = 276,423.57 (miles,
+  presumably - clearly wrong either way), `fare_amount` max =
+  $863,372.12.
+- **124 negative-duration trips** (`tpep_dropoff_datetime` before
+  `tpep_pickup_datetime`) and **1,927 zero-duration trips** - neither
+  column is null-checked against the other by TLC before publishing.
+- **22 rows with `tpep_pickup_datetime` outside the file's nominal
+  month** - TLC's monthly files routinely leak a handful of rows from
+  adjacent months; this has no equivalent concept in a live Kafka
+  stream (there's no file-month boundary), so it's reframed below as
+  a watermark-lateness metric instead of a standalone one.
+
+**Decision 1: metrics computed inline in the Flink job, not by a
+separate batch reader over Iceberg (your call).** The alternative -
+a standalone job periodically querying Iceberg after ingestion - was
+real and stated before this was decided: it would decouple metrics
+logic from the streaming pipeline (change what's measured without
+redeploying the ingestion job) at the cost of latency (metrics lag
+ingestion by however often that job runs) and a second read pass over
+the same data. Inline wins because CLAUDE.md already commits to
+instrumenting detection latency starting this sprint - a metrics path
+with a built-in lag before it even reaches the detector would
+undercut the number this project exists to publish.
+
+**Decision 2: fixed event-time tumbling windows, not fixed row-count
+batches (your call).** The alternative was real and already
+demonstrated to have a real cost: DEFENSE.md #40 measured that a
+fixed *row-count* window (the shuffle window) spans wildly different
+event-time durations depending on local pickup density - the same
+problem would recur here if metrics windows were row-count-based,
+making "what happened at 3am" unanswerable without a lookup. Fixed
+time windows keep the window key directly meaningful. Window size:
+**1 minute of event time**, a parameter (not hardcoded), chosen as
+fine-grained enough to localize an incident to roughly the minute
+(the "localizes" half of this project's own mission statement) while
+still holding enough rows per window to make a rate-based metric
+(null %, negative %) statistically meaningful outside of the sparsest
+overnight windows. Not claimed as tuned or final - like the p99
+bound in #40, it's a stated default subject to revision once the
+detection engine is actually run against it.
+
+**Decision 3: narrow (long) schema in Postgres, not one wide row per
+window.** Real alternative: a wide table (one column per metric per
+source column) would need a migration every time a new metric or
+source column is added, and would already need on the order of 20
+columns x 3-4 metrics = 60-80 columns for this dataset alone. A
+narrow table - one row per `(window_start, window_end, column_name,
+metric_name, metric_value)` - trades that off against needing a
+`GROUP BY`/join to reconstruct a window's full picture, in exchange
+for adding a new metric or column being a data-insert, not a schema
+migration. Two tables, not one:
+  - `window_metrics` (one row per window): `window_start`,
+    `window_end`, `row_count`, `late_event_count`,
+    `lateness_p50_seconds`, `lateness_p99_seconds`,
+    `lateness_max_seconds` - the watermark-lateness numbers absorb
+    the "22 rows outside the nominal month" finding above: in a live
+    stream that's not a month-boundary concept, it's just lateness
+    beyond whatever bound #40 recommends, and it's already being
+    measured for exactly that reason.
+  - `column_metrics` (one row per window per source column per
+    metric): `window_start`, `window_end`, `column_name`,
+    `metric_name`, `metric_value`. Indexed on `(column_name,
+    metric_name, window_start)` - the access pattern a detector
+    needs is "give me column X's null-rate time series," not "give
+    me everything about window Y."
+
+**What gets computed per column, and why each one is grounded in a
+real finding above, not a guess:**
+  - `null_count` - every column, all five null-heavy columns found
+    above are covered by this alone.
+  - `distinct_count` - categorical columns only (`VendorID`,
+    `RatecodeID`, `payment_type`, `PULocationID`, `DOLocationID`,
+    `store_and_fwd_flag`) - a cardinality jump (e.g. a new
+    `PULocationID` appearing) is itself a detectable incident
+    signature, independent of any rate.
+  - `negative_count` - every numeric column where negative is
+    possible in the schema but domain-nonsensical on its own
+    (`fare_amount`, `tip_amount`, `tolls_amount`, `total_amount`,
+    `trip_distance`, `passenger_count`) - a pure count against the
+    fixed threshold zero, not a judgment call about what's an
+    outlier, so it needs no invented bound (CLAUDE.md hard rule 1).
+  - `min`, `max`, `mean` - every numeric column. Deliberately NOT
+    accompanied by a stored "is this an outlier" flag or bound in
+    this table - classifying $863,372.12 as anomalous requires a
+    baseline to compare against (a prior window, or a
+    calibration pass), which is the detection engine's job (not yet
+    built), not something for the metrics store to hardcode a
+    magic threshold for. The metrics store's job is descriptive
+    statistics; anomaly classification is a separate, later
+    component that reads this table, deliberately kept out of it so
+    this component doesn't quietly become both.
+  - `negative_duration_count`, `zero_duration_count` - derived from
+    `tpep_dropoff_datetime - tpep_pickup_datetime`, not a raw column;
+    stored as `column_name = 'trip_duration'` rows in the same
+    `column_metrics` table rather than a separate table, since
+    they're the same shape of fact (a count against a fixed
+    threshold) as `negative_count` above.
+
+Rates (null %, negative %, etc.) are deliberately NOT stored
+pre-divided - `column_metrics.metric_value` holds the raw count, and
+`window_metrics.row_count` holds the denominator; a rate is computed
+at query time via a join. Storing a pre-divided rate would be a
+second, derived copy of the same fact with its own rounding, and
+CLAUDE.md's discipline throughout this project has been to keep
+exactly one stored ground truth per fact (the broker's delivery
+callback, not "we called send()"; the running-max lateness
+definition, not a second wall-clock one) - this is the same principle
+applied to the metrics store.
