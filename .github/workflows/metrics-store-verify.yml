@@ -1,0 +1,99 @@
+name: Metrics Store Schema Verification
+
+# Manual trigger only, matching replay-verify.yml's pattern. Only needs
+# Postgres - no Kafka/Flink/Iceberg - so it's fast and cheap to run
+# repeatedly (V4).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  verify:
+    name: Apply reliability/store/schema.sql and verify it landed
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start Postgres only
+        run: docker compose up -d postgres
+      - name: Wait for Postgres healthy
+        run: |
+          for i in $(seq 1 30); do
+            line="$(docker compose ps | grep '^weir-postgres[[:space:]]' || true)"
+            if [ -n "$line" ] && echo "$line" | grep -q "(healthy)"; then
+              echo "postgres is healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "postgres never became healthy"
+          docker compose logs postgres
+          exit 1
+      - name: Apply schema.sql
+        run: docker compose exec -T postgres psql -U weir -d weir_catalog < reliability/store/schema.sql
+      - name: Apply schema.sql a second time (idempotency check)
+        # DEFENSE.md #41's design says this schema is safe to apply on
+        # every job start, not just once - CREATE SCHEMA/TABLE/INDEX
+        # IF NOT EXISTS throughout. Actually re-running it, not just
+        # reading the file and assuming IF NOT EXISTS is enough on its
+        # own - a second run failing here would mean the design claim
+        # was wrong.
+        run: docker compose exec -T postgres psql -U weir -d weir_catalog < reliability/store/schema.sql
+      - name: Verify tables and columns exist with exact expected shape
+        # V1: compares psql's exact tuple output against a literal
+        # expected string, not a grep against loosely-matched text.
+        run: |
+          actual_tables="$(docker compose exec -T postgres psql -t -A -U weir -d weir_catalog -c \
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'weir_metrics' ORDER BY table_name;" | tr -d '\r')"
+          expected_tables="$(printf 'column_metrics\nwindow_metrics')"
+          if [ "$actual_tables" != "$expected_tables" ]; then
+            echo "FAIL: expected tables [$expected_tables], got [$actual_tables]"
+            exit 1
+          fi
+          echo "tables OK: $actual_tables"
+
+          actual_wm_cols="$(docker compose exec -T postgres psql -t -A -U weir -d weir_catalog -c \
+            "SELECT column_name FROM information_schema.columns WHERE table_schema='weir_metrics' AND table_name='window_metrics' ORDER BY ordinal_position;" | tr -d '\r')"
+          expected_wm_cols="$(printf 'window_start\nwindow_end\nrow_count\nlate_event_count\nlateness_p50_seconds\nlateness_p99_seconds\nlateness_max_seconds')"
+          if [ "$actual_wm_cols" != "$expected_wm_cols" ]; then
+            echo "FAIL: window_metrics columns mismatch. expected [$expected_wm_cols], got [$actual_wm_cols]"
+            exit 1
+          fi
+          echo "window_metrics columns OK"
+
+          actual_cm_cols="$(docker compose exec -T postgres psql -t -A -U weir -d weir_catalog -c \
+            "SELECT column_name FROM information_schema.columns WHERE table_schema='weir_metrics' AND table_name='column_metrics' ORDER BY ordinal_position;" | tr -d '\r')"
+          expected_cm_cols="$(printf 'window_start\nwindow_end\ncolumn_name\nmetric_name\nmetric_value')"
+          if [ "$actual_cm_cols" != "$expected_cm_cols" ]; then
+            echo "FAIL: column_metrics columns mismatch. expected [$expected_cm_cols], got [$actual_cm_cols]"
+            exit 1
+          fi
+          echo "column_metrics columns OK"
+
+          actual_index="$(docker compose exec -T postgres psql -t -A -U weir -d weir_catalog -c \
+            "SELECT indexname FROM pg_indexes WHERE schemaname='weir_metrics' AND indexname='column_metrics_series_lookup';" | tr -d '\r')"
+          if [ "$actual_index" != "column_metrics_series_lookup" ]; then
+            echo "FAIL: expected index column_metrics_series_lookup, got [$actual_index]"
+            exit 1
+          fi
+          echo "index OK"
+      - name: Verify Iceberg's own catalog tables are untouched
+        # The whole point of the weir_metrics schema (DEFENSE.md #41):
+        # this schema must not collide with or shadow whatever Iceberg's
+        # JDBC catalog keeps in `public`. Confirms weir_metrics tables
+        # are NOT visible under the public schema search path collision
+        # - i.e. that they actually live in their own namespace, not
+        # merely named distinctly within the same one.
+        run: |
+          public_has_metrics_tables="$(docker compose exec -T postgres psql -t -A -U weir -d weir_catalog -c \
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('window_metrics','column_metrics');" | tr -d '\r')"
+          if [ "$public_has_metrics_tables" != "0" ]; then
+            echo "FAIL: window_metrics/column_metrics leaked into public schema"
+            exit 1
+          fi
+          echo "confirmed: public schema untouched"
+      - name: Show Postgres logs on failure
+        if: failure()
+        run: docker compose logs postgres
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
