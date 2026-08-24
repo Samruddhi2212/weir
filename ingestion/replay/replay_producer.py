@@ -10,12 +10,14 @@ between sends equal to each pair's real inter-arrival time divided by
 Design decisions (dataset scope, synthetic trip key, time-compression
 formula and its cap, zone IDs left unresolved, producer library reuse,
 V5 re-audit, emission log, resume-seam determinism, ratio-test
-isolation from the cap) are recorded in DEFENSE.md #38-#39, written
+isolation from the cap, bounded-window send-order shuffle for
+out-of-order injection) are recorded in DEFENSE.md #38-#40, written
 before this file.
 """
 import argparse
 import datetime
 import json
+import random
 import sys
 import threading
 import time
@@ -82,7 +84,26 @@ def filter_resume(rows, resume_after_timestamp, resume_skip_ties):
     return result
 
 
-def replay(rows, producer, topic, speed_factor, max_sleep, limit, emission_log_path=None):
+def build_send_order(n, window, seed):
+    """Returns a list of indices into a chronologically-sorted sequence
+    of length n: identity order if window <= 1, otherwise partitioned
+    into non-overlapping windows of `window` consecutive indices, each
+    shuffled independently. An event's send position can never move
+    more than window-1 slots from its true chronological position - a
+    deterministic bound, not an open-ended tail. See DEFENSE.md #40."""
+    order = list(range(n))
+    if window <= 1:
+        return order
+    rng = random.Random(seed)
+    for start in range(0, n, window):
+        block = order[start:start + window]
+        rng.shuffle(block)
+        order[start:start + window] = block
+    return order
+
+
+def replay(rows, producer, topic, speed_factor, max_sleep, limit, emission_log_path=None,
+           shuffle_window=0, shuffle_seed=42):
     if limit:
         rows = rows[:limit]
     if not rows:
@@ -105,7 +126,6 @@ def replay(rows, producer, topic, speed_factor, max_sleep, limit, emission_log_p
     confirmed = 0
     delivery_failures = []
     lock = threading.Lock()
-    prev_pickup = None
 
     def on_success(key, event_ts_iso, metadata):
         nonlocal confirmed
@@ -127,15 +147,26 @@ def replay(rows, producer, topic, speed_factor, max_sleep, limit, emission_log_p
         with lock:
             delivery_failures.append({"key": key, "error": str(exc)})
 
-    for row in rows:
-        pickup = row[PICKUP_COLUMN]
-        if prev_pickup is not None:
-            real_delta_seconds = max((pickup - prev_pickup).total_seconds(), 0.0)
-            sleep_seconds = min(real_delta_seconds / speed_factor, max_sleep)
-            if sleep_seconds > 0:
-                time.sleep(sleep_seconds)
-        prev_pickup = pickup
+    # Deltas are computed against TRUE chronological order, before any
+    # shuffling of send order - each row's own pacing sleep is tied to
+    # its real chronological predecessor regardless of when it actually
+    # gets sent. Windows are non-overlapping and shuffling only permutes
+    # within one, so the total of all sleeps - and therefore overall
+    # replay duration and the compression ratio (DEFENSE.md #39's ratio
+    # test) - is unchanged by turning shuffling on. See DEFENSE.md #40.
+    deltas = [0.0] * len(rows)
+    for i in range(1, len(rows)):
+        deltas[i] = max((rows[i][PICKUP_COLUMN] - rows[i - 1][PICKUP_COLUMN]).total_seconds(), 0.0)
 
+    send_order = build_send_order(len(rows), shuffle_window, shuffle_seed)
+
+    for idx in send_order:
+        row = rows[idx]
+        sleep_seconds = min(deltas[idx] / speed_factor, max_sleep)
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+
+        pickup = row[PICKUP_COLUMN]
         # _row_index is stable across the whole dataset (assigned in
         # load_sorted_trips, before any --limit/--resume slicing) - see
         # DEFENSE.md #39 for why the key must not be derived from a
@@ -184,6 +215,17 @@ def main():
         help="also skip this many rows with pickup time == --resume-after-timestamp - "
              "must equal how many such rows a prior run already sent, or the seam gaps/duplicates (DEFENSE.md #39)",
     )
+    parser.add_argument(
+        "--shuffle-window", type=int, default=0,
+        help="bounded out-of-order injection (DEFENSE.md #40): shuffle send order within non-overlapping "
+             "windows of this many rows; event_ts is untouched, pacing stays tied to true chronological order. "
+             "0 (default) = disabled, perfectly in-order replay.",
+    )
+    parser.add_argument(
+        "--shuffle-seed", type=int, default=42,
+        help="seed for --shuffle-window's shuffling - fixed by default so the injected disorder is "
+             "reproducible, not a one-off random result (DEFENSE.md #40)",
+    )
     args = parser.parse_args()
 
     print(f"replay_producer.py: loading {args.input}", file=sys.stderr)
@@ -208,6 +250,7 @@ def main():
         attempted, confirmed = replay(
             rows, producer, args.topic, args.speed_factor, args.max_inter_arrival_sleep, args.limit,
             emission_log_path=args.emission_log,
+            shuffle_window=args.shuffle_window, shuffle_seed=args.shuffle_seed,
         )
     finally:
         producer.close(timeout=30)
