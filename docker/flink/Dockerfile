@@ -52,6 +52,16 @@ ARG ICEBERG_VERSION=1.11.0
 ARG KAFKA_CONNECTOR_VERSION=4.0.1-2.0
 ARG POSTGRES_JDBC_VERSION=42.7.13
 ARG HADOOP_VERSION=3.4.3
+# Part 3.1's metrics job needs 'connector'='jdbc'. Unlike Kafka, the JDBC
+# connector has no flink-sql-connector-jdbc uber jar (confirmed via Maven
+# Central's search API - no such artifact exists); Flink 4.x split it
+# into a thin core jar plus a per-database dialect jar, so both are
+# needed alongside the postgresql driver jar above. See DEFENSE.md #43
+# for the version-compatibility caveat (this "-2.0" build targets Flink
+# 2.0.0 specifically, confirmed from its own pom.xml - not 2.1.0, which
+# is the line this image is actually on) and PROVENANCE.md for why two
+# jars instead of one.
+ARG JDBC_CONNECTOR_VERSION=4.0.0-2.0
 
 USER root
 
@@ -68,6 +78,10 @@ RUN set -eux; \
       "https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/${KAFKA_CONNECTOR_VERSION}/flink-sql-connector-kafka-${KAFKA_CONNECTOR_VERSION}.jar"; \
     curl -fSL -o "postgresql-${POSTGRES_JDBC_VERSION}.jar" \
       "https://repo1.maven.org/maven2/org/postgresql/postgresql/${POSTGRES_JDBC_VERSION}/postgresql-${POSTGRES_JDBC_VERSION}.jar"; \
+    curl -fSL -o "flink-connector-jdbc-core-${JDBC_CONNECTOR_VERSION}.jar" \
+      "https://repo1.maven.org/maven2/org/apache/flink/flink-connector-jdbc-core/${JDBC_CONNECTOR_VERSION}/flink-connector-jdbc-core-${JDBC_CONNECTOR_VERSION}.jar"; \
+    curl -fSL -o "flink-connector-jdbc-postgres-${JDBC_CONNECTOR_VERSION}.jar" \
+      "https://repo1.maven.org/maven2/org/apache/flink/flink-connector-jdbc-postgres/${JDBC_CONNECTOR_VERSION}/flink-connector-jdbc-postgres-${JDBC_CONNECTOR_VERSION}.jar"; \
     curl -fSL -o "hadoop-client-api-${HADOOP_VERSION}.jar" \
       "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-client-api/${HADOOP_VERSION}/hadoop-client-api-${HADOOP_VERSION}.jar"; \
     curl -fSL -o "hadoop-client-runtime-${HADOOP_VERSION}.jar" \

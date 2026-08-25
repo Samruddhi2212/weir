@@ -17,6 +17,19 @@
   reference only solves job-level Gradle compile dependencies (DataStream
   API), a different problem. The Kafka SQL connector and Postgres JDBC
   driver versions are independently sourced, not from reference.
+  Part 3.1 (DEFENSE.md #42/#43) added two more independently-sourced
+  jars for `'connector'='jdbc'`: `flink-connector-jdbc-core` and
+  `flink-connector-jdbc-postgres`, both `4.0.0-2.0` - two thin jars
+  instead of one uber jar like Kafka's, because no
+  `flink-sql-connector-jdbc` uber-jar equivalent exists on Maven
+  Central for any version (checked, not assumed) - Flink 4.x split the
+  JDBC connector into a generic core module and a per-database dialect
+  module instead. `4.0.0-2.0` is also the *only* JDBC connector build
+  that exists at all (three versions total on Maven Central), and its
+  own `pom.xml` (checked at both the `v4.0.0` and `v4.1.0` git tags)
+  declares `<flink.version>2.0.0</flink.version>` - built against Flink
+  2.0.0, not this image's 2.1.0. Same-minor-line compatibility, not a
+  confirmed exact match; see DEFENSE.md #43.
 
 ## Copied from upstream Apache Flink (Apache-2.0)
 
