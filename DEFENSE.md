@@ -2327,3 +2327,169 @@ was checked inside the actual container as `docker compose` runs it -
 mounts and all - not just confirmed as present in a bare `docker
 build` layer. See the same commit's CI run for the real output of
 `docker compose exec flink-jobmanager ls /opt/flink/lib`.
+
+## 44. The volume detector's design, before any detector code
+
+Written before `reliability/volume/`'s implementation, per D1. Studied
+(not copied) `reference/streaming-lakehouse-lab/pyflink_jobs/src/jobs/
+ewma_ad.py` first - PROVENANCE.md's "Studied, not copied" section
+records that read. That job's actual algorithm: a single continuously-
+updating EWMA mean and EWMA-variance per key (device_id), no
+time-of-day/day-of-week structure at all, anomaly flagged at
+`|x - EWMA| > K * sqrt(Var)`, K=3.0. Weir's volume detector diverges
+from it in three real ways, each with a reason:
+
+**1. Bucketed by (weekday, hour-of-day), not one global running
+baseline.** A single EWMA over `window_metrics.row_count` would treat
+every rush-hour burst and overnight lull as deviation from "normal,"
+constantly firing on ordinary daily/weekly seasonality already
+documented in this project's own data findings (#38, #41). Rejected
+alternatives, both real and considered: (a) STL/seasonal decomposition
+- explicitly separates trend from seasonality, but is a batch fit
+requiring periodic re-fitting over a full history window, not a
+natural per-window streaming update; wrong shape for a job that
+processes one window at a time. (b) A flat rolling average over the
+last N same-bucket occurrences - simpler to explain, but needs to
+store N raw historical values per bucket instead of one compact
+running statistic, and weights an 8-week-old occurrence the same as
+last week's, reacting slower to genuine regime shifts.
+
+**2. Bucket granularity is (weekday, HOUR), not (weekday, hour,
+minute).** A (weekday, hour, minute) bucket only recurs once every 7
+days - at most 4-5 occurrences in this project's entire dataset,
+nowhere near enough to build any baseline, in this project's lifetime
+or a real deployment's early months. (weekday, hour) gives ~60
+observations/week/bucket (one per 1-minute window within that hour),
+and - because every weekday-hour combination recurs exactly once every
+7 days - all 168 buckets warm up in lockstep with calendar time, not on
+a staggered per-bucket schedule.
+
+**3. Modified (robust) z-score, not the reference's variance-based
+one - and the exact Iglewicz-Hoaglin formula, not an invented one.**
+`z = 0.6745 * (x - ewma_median) / scale`, flagged at `|z| > 3.5`
+(Iglewicz, B. and Hoaglin, D.C. (1993), "How to Detect and Handle
+Outliers", ASQC Quality Press - the standard modified-z-score
+convention; 0.6745 and 3.5 are its established constants, not
+independently chosen). A MAD-based scale is far less sensitive to a
+single unusual historical week than the reference's variance-based
+one, which is what this project needs given the baseline itself will
+contain real seasonal spikes and holidays (below) that a variance
+estimate would let distort the threshold for a long time afterward.
+
+**Warmup: `min_baseline_weeks = 8` (-> `min_observations = 480`,
+derived, not a separate magic number), and honest about what that
+buys.** Below threshold, the detector emits a distinct
+`status = "insufficient_baseline"` record - `score = None`, no
+incident ever written - not a suppressed score or a score of 0. The
+real sample size that matters for MAD stability is *distinct weekly
+occurrences* (8), not raw per-window updates (480, autocorrelated
+within each hour) - and 8 is genuinely on the low side of robust-stats
+guidance, which generally wants n>=20-30 for a well-behaved MAD. This
+is stated as a floor against the worst cold-start noise, not a claim
+of full maturity at exactly 8 weeks. Consequence, stated explicitly
+rather than left implicit: **this project's measured false-positive
+rate for the volume detector should be read as an upper bound, not a
+settled number** - a longer baseline than this dataset's available
+history would likely lower it further, and CLAUDE.md hard rule 1 (no
+fabricated/inflated-precision metrics) applies as much to *how a real
+number is characterized* as to whether it's real at all.
+
+**MAD = 0 floor: Poisson-justified, not an arbitrary constant.**
+`scale = max(mad, sqrt(ewma_mean), 1.0)`. Row count is a count of
+arrivals; under a simple homogeneous-arrivals assumption, variance ~=
+mean, so `sqrt(mean)` is a principled lower bound on plausible noise
+for a bucket of that magnitude - self-scaling (a quiet overnight
+bucket gets a small floor, rush hour a larger one), with an absolute
+floor of `1.0` underneath for the zero-mean edge case, since row
+counts are integers and a sub-1 difference is meaningless. Unit-tested
+explicitly against identical historical values (MAD would otherwise be
+exactly 0).
+
+**DST: drop the ambiguous hour, don't guess at UTC normalization.**
+Confirmed empirically, not assumed, that `tpep_pickup_datetime` is
+naive local (America/New_York) civil time: Nov 3 2024's hour=1 had
+9,869 trips against 5,606 on the equivalent Saturday (Nov 2) - a ~76%
+jump isolated to exactly the fall-back hour, consistent with that
+wall-clock hour occurring twice that night; UTC storage would show no
+such anomaly. A pure fall-back (which Nov 3 2024 is) doubles one
+bucket's data for that week; it does not zero one out - that's
+spring-forward's effect, not present in the Oct 2024-Jan 2025 window.
+"Normalize to UTC" was considered and rejected: doing so would require
+disambiguating which of the two "1:00-1:59am" batches is pre- or
+post-transition, which is NOT recoverable from a naive timestamp alone
+without an unverifiable assumption - exactly the kind of fabricated
+certainty this project's discipline forbids. Dropping the ambiguous
+hour (Nov 3 2024, 01:00:00-01:59:59 local, that week only) from both
+warmup counting and scoring is a small, explicit, honest exclusion
+instead.
+
+**Holidays: stay in the baseline, on purpose.** Thanksgiving,
+Christmas, and New Year's fall inside the Oct 2024-Jan 2025 window and
+are genuinely anomalous ridership. Excluding them would be curating
+the baseline to avoid an inconvenient result - the same shape of
+problem hard rule 3 forbids for benchmark scenarios ("never tune a
+detector to pass a benchmark scenario... if it misses, it misses").
+Real production baselines contain real holidays; a detector that's
+never seen one in its baseline isn't more correct, just untested
+against a real, recurring case. Consequence, stated explicitly: the
+clean (no injected failure) replay may report real false positives on
+these specific days, and that gets reported as a real, disclosed
+number - not suppressed, not excluded after the fact to make the
+published rate look better.
+
+**Multi-month loader reads only `tpep_pickup_datetime`, not full
+rows - and that's what makes the schema mismatch a non-issue.**
+Confirmed (not assumed) that Oct/Nov/Dec 2024's TLC files have 19
+columns, missing `cbd_congestion_fee` entirely (Jan 2025 has 20) -
+NYC's Manhattan congestion pricing fee started January 2025, so this
+is real and expected, not a data error. The volume detector needs
+nothing but pickup timestamps to compute per-window row counts, so the
+loader built for it (`ingestion/replay/load_pickup_timestamps.py`)
+projects only that one column, which is schema-identical across all
+four months - sidestepping the mismatch entirely rather than needing
+to reconcile it (e.g. via a null-filled column). This loader is for
+ground-truth/baseline construction only (V7 - independent of the
+system under test); the production detector reads its baseline from
+`weir_metrics` in Postgres, never from raw parquet.
+
+**Data range: Oct 2024-Jan 2025 (~17.4 weeks), not the existing single
+month.** One month (~4.3 weeks) is under the 8-week warmup threshold -
+confirmed insufficient before writing any detector code, per this
+project's own instruction to fix data sufficiency first rather than
+shrink the threshold to fit what happened to already be downloaded.
+~17.4 weeks gives 8 for warmup and ~9 remaining where the integration
+test can demonstrate real scoring against a matured baseline, not a
+detector that barely crosses the warmup line at the last window in the
+dataset.
+
+**Addendum, found building the loader: 10 rows across these four
+files have clock-error pickup timestamps years off (2002, 2008,
+2009) or into March 2025 - not legitimate month-boundary spillover.**
+Confirmed via an independent pyarrow.compute filter in
+`tests/integration/test_load_pickup_timestamps.py`, not eyeballed.
+`load_pickup_timestamps.py` drops anything outside each requested
+month's own span +/-7 days (generous relative to the ~22-row spillover
+`#41` already found for a single month; nowhere near enough to admit
+a timestamp that's years off) and reports the exact count and values
+dropped - not silently. First version of the verifying test asserted
+"9" from a manual check that used a looser bound (through Feb 15)
+than the loader's actual margin_days=7 policy (through Feb 8); the
+test's own independent check caught the mismatch and the expectation
+was corrected to the real, verified number (10) - the test doing
+exactly the job V7/V8 exist for.
+
+**Consequence for the published false-positive rate: read it as an
+upper bound, not a settled number.** With `min_baseline_weeks = 8`,
+the MAD's effective independent sample size (8 distinct weekly
+occurrences per bucket) is below the n>=20-30 robust-stats guidance
+generally wants for a stable estimate - stated earlier in this entry,
+repeated here because it has a direct, honest consequence for any
+number this detector eventually publishes. A noisier-than-ideal MAD
+means more scored windows land near the flagging threshold by chance,
+which pushes a measured false-positive rate up, not down - so
+whatever number the benchmark eventually reports for this detector is
+more likely to overstate the true rate than understate it. A longer
+baseline than this dataset's ~17 weeks would likely lower it further.
+This same caveat is stated in README.md, next to where that number
+will eventually appear, not buried here alone - an honest upper bound
+is more credible than a clean number with no stated uncertainty.
