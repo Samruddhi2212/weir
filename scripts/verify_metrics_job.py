@@ -266,11 +266,24 @@ def main():
     if cp.returncode != 0:
         fail("could not copy resolved metrics_job.sql into flink-jobmanager")
 
+    # Verify the file that actually landed in the container, not assume
+    # the copy produced what was intended - a silent truncation/empty-
+    # file bug would otherwise look identical to a sql-client problem.
+    landed = run(["docker", "compose", "exec", "-T", "flink-jobmanager",
+                  "wc", "-l", "/tmp/weir_metrics_job_resolved.sql"], timeout=15)
+    print_raw("wc -l of the file that landed in the container", landed.stdout + landed.stderr)
+    landed_cat = run(["docker", "compose", "exec", "-T", "flink-jobmanager",
+                       "cat", "/tmp/weir_metrics_job_resolved.sql"], timeout=15)
+    print_raw("full content of the file that landed in the container", landed_cat.stdout + landed_cat.stderr)
+
     submit = run(["docker", "compose", "exec", "-T", "flink-jobmanager",
                   "./bin/sql-client.sh", "-f", "/tmp/weir_metrics_job_resolved.sql"], timeout=90)
     print_raw("sql-client.sh (job submission)", submit.stdout + submit.stderr)
+    # Dump Flink's own logs unconditionally here, not only on failure -
+    # a clean exit code with near-empty sql-client output is itself
+    # inconclusive without seeing what the cluster side actually did.
+    docker_compose_logs(["flink-jobmanager", "flink-taskmanager"])
     if submit.returncode != 0:
-        docker_compose_logs(["flink-jobmanager", "flink-taskmanager"])
         fail(f"sql-client exited {submit.returncode} submitting metrics_job.sql")
 
     m = re.search(r"Job ID:\s*([0-9a-f]{32})", submit.stdout)
