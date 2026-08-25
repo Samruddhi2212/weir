@@ -2493,3 +2493,311 @@ baseline than this dataset's ~17 weeks would likely lower it further.
 This same caveat is stated in README.md, next to where that number
 will eventually appear, not buried here alone - an honest upper bound
 is more credible than a clean number with no stated uncertainty.
+
+## 45. The volume detector runs as its own process, state in Postgres
+- not Flink keyed state, and why that's not just safer but necessary
+
+Written before `reliability/volume/`'s schema or code, per D1.
+
+**Decision: a separate Python process, not part of `metrics_job.sql`.
+State (the warmed EWMA/MAD baseline) lives in Postgres, not Flink
+keyed state.** Real alternative, stated before being rejected: Flink
+keyed state is faster (no network round-trip per update) and is
+exactly what the reference `ewma_ad.py` already does, just re-keyed by
+(weekday, hour) instead of `device_id`. Rejected because:
+
+- It dies with anything beyond a checkpoint-recoverable TaskManager
+  failure - a deliberate redeploy, a savepoint mistake, a state-schema
+  change - and losing it means losing 8+ weeks of accumulated history
+  that Kafka retention almost certainly can't replay from scratch.
+- It's not inspectable without Flink's own state-processor tooling;
+  Postgres state answers "what does this bucket's baseline currently
+  look like" with a plain `SELECT`.
+- Every genuinely novel piece of Flink SQL/connector syntax tried this
+  session has found a real bug on first contact (#33, #42 x2, #43) -
+  putting a stateful anomaly detector's own logic inside another Flink
+  job adds a fifth surface for that same tax, for no compensating
+  benefit at a 1-window-per-minute update cadence where a few ms of
+  Postgres round-trip is irrelevant.
+- **The argument that actually settles it, not just favors it: the
+  sensitivity sweep this project has already committed to (measuring
+  how detection/false-positive rate vary with threshold and other
+  config) needs to re-score the same historical data at many parameter
+  settings.** That's only tractable if the baseline is warmed once and
+  stored, then re-scored cheaply against different thresholds. Flink
+  keyed state would mean a full 8-week rewarm per sweep point - with,
+  say, 20 sweep points, that's 20 full baseline rebuilds instead of
+  one. Postgres state isn't just the safer choice here; it's the only
+  one that makes a deliverable already on this project's roadmap
+  actually tractable.
+
+**Dependency: `psycopg[binary]==3.3.4` (v3, not psycopg2) - approved,
+per hard rule 6.** psycopg2 is in extended maintenance mode; psycopg 3
+is the actively developed line, with better type support and native
+async, and this project's other Python code already targets a modern
+interpreter. `[binary]` pulls prebuilt wheels rather than requiring
+libpq-dev/a C compiler on every machine this runs on (CI runners, this
+project's Windows dev machine) - the tradeoff psycopg's own docs
+describe as convenience-over-leanness, chosen deliberately given this
+project has no existing build-toolchain requirement for Python code
+today. Pinned to 3.3.4, the latest stable release at the time of this
+decision (confirmed via PyPI's own JSON API, not assumed).
+`reliability/volume/requirements.txt` is a new, directory-scoped
+manifest - this project has no root-level Python requirements file yet
+(every other Python dependency so far was installed ad hoc per CI
+step); scoping it to the directory that needs it avoids implying a
+project-wide dependency policy that doesn't exist yet.
+
+**Idempotent scoring: `scored_windows`'s own UNIQUE constraint is the
+correctness backstop; `detector_progress` is the fast resume-point.**
+Every window that gets past `insufficient_baseline` is logged to
+`weir_incidents.scored_windows`, keyed uniquely on `(detector_name,
+window_start, window_end)`. Processing a window is one transaction:
+update `baseline_state`'s EWMA for its bucket, insert the
+`scored_windows` row, insert an `incidents` row if the score crosses
+threshold, and advance `detector_progress.last_processed_window_end` -
+all four writes commit together or none do. A crash mid-transaction
+rolls back cleanly (that window simply gets reprocessed next run,
+exactly once, since nothing partial was ever committed); a restart
+resumes from `detector_progress` (an O(1) lookup, not a scan of
+`scored_windows` for its max) but even if that value were somehow
+wrong, `scored_windows`'s UNIQUE constraint would reject a genuine
+double-processing attempt outright rather than silently double-
+applying a window to the EWMA. Windows must be processed in
+chronological order for the EWMA recursion to mean anything, so one
+global watermark per `detector_name` is sufficient - a bucket's own
+occurrences are a subset of the globally chronological sequence, so
+processing globally in order processes each bucket's occurrences in
+order too.
+
+**Baseline state and scoring results are separable, on purpose - the
+same fact that makes the sweep tractable, reflected in the schema.**
+Three tables, not one: `baseline_state` (the warmed per-bucket EWMA/
+MAD, updated once as live data streams in - the ONLY table a
+sensitivity sweep never touches), `scored_windows` (an append-only log
+of every scored window's inputs - `observed_value`,
+`baseline_mean_at_time`, `baseline_scale_at_time` - decoupled from any
+particular threshold decision, so a sweep recomputes `score`/flag at a
+different threshold straight from these stored numbers, never
+re-reading `weir_metrics` or re-running the EWMA recursion), and
+`incidents` (only the rows that crossed the *currently configured*
+threshold - the smaller, actionable table something like an alerting
+system would consume). If baseline and scoring shared one table and
+lifecycle, a sweep would force a rebuild every time; separating them
+is what makes "warm once, re-score cheaply many times" real rather
+than aspirational.
+
+**Correction, made honestly before it became a false claim in a
+docstring: this is an EWMA-recursive *approximation* of Iglewicz-
+Hoaglin, not a literal implementation of it.** The true modified
+z-score is defined against a sample's actual median and MAD (median
+absolute deviation), computed from a static, sorted collection of
+historical values - not something an O(1)-state exponential recursion
+can produce, since neither median nor MAD is a linear function of its
+inputs the way a mean is. What this detector actually tracks per
+bucket is an exponentially weighted MEAN (`ewma_mean`) and an
+exponentially weighted MEAN ABSOLUTE DEVIATION from that mean
+(`ewma_mad`) - a standard, legitimate robust-ish streaming
+approximation (used under names like "MEWMA" in some statistical-
+process-control literature), but not the same statistic Iglewicz and
+Hoaglin (1993) defined. Caught while designing the schema (deciding
+what `ewma_mad` actually means precisely enough to write a column
+comment), not after shipping a docstring that overclaimed.
+
+**Follow-on correction: Iglewicz-Hoaglin's 0.6745 doesn't transfer to
+a mean-absolute-deviation scale - reusing it anyway would make the
+score tighter than its own label implies.** Confirmed independently
+(not just asserted) that for a normal distribution, MAD (median-
+based) ~= 0.6745*sigma while MeanAD (mean-based) ~= 0.7979*sigma =
+sigma*sqrt(2/pi) - two different constants because MAD and MeanAD are
+different statistics of the same distribution, not interchangeable
+approximations of each other. `0.6745 / 0.7979 ~= 0.8455`, meaning
+reusing 0.6745 as this detector's scale divisor, with `ewma_mad` (a
+MeanAD, not a MAD) as the input, silently produces an *effective*
+threshold around `3.5 * 0.8455 ~= 2.96` sigma-equivalents while the
+code would still read "3.5" - tighter than the label states, which
+means more false positives than the stated threshold implies, not
+fewer.
+
+**Decision: rescale by `1/0.7979 ~= 1.2533` (equivalently
+`sqrt(pi/2)`) - the MeanAD-to-sigma constant, not MAD's - keeping the
+threshold at 3.5.** Real alternative, stated before rejecting it: keep
+0.6745/3.5 as empirically-tuned constants with no sigma-equivalent
+claim at all, and let the sensitivity sweep (DEFENSE.md #44's honest-
+upper-bound framing already anticipates this project publishing a
+false-positive rate against this exact score) find a working threshold
+empirically instead of asserting one. Rejected because this project is
+about to publish a false-positive rate measured against this score -
+an interpretable unit (a real number of sigma-equivalents) is worth
+more here than bit-for-bit continuity with a reference algorithm this
+detector already deliberately diverges from in three other ways (this
+entry, above). The final formula: `z = (x - ewma_mean) /
+max(1.2533 * ewma_mad, sqrt(ewma_mean), 1.0)`, flagged at `|z| > 3.5`
+- the Poisson-noise floor (`sqrt(ewma_mean)`) is applied to the
+already-rescaled, sigma-equivalent quantity, not to raw `ewma_mad`,
+so the floor and the scale live in the same units throughout.
+
+**Docstring requirement, stated plainly, not implied away:** this
+detector computes an EWMA-of-mean-absolute-deviation, rescaled by the
+MeanAD-to-sigma constant (`sqrt(pi/2) ~= 1.2533`) - not a true
+median/MAD, and not Iglewicz-Hoaglin's own formula, even though the
+3.5 threshold convention is reused from it. An exact-MAD variant would
+require retaining a sorted historical sample per bucket instead of an
+O(1) recursive update, which is precisely the state-size tradeoff this
+detector's streaming design exists to avoid.
+
+**Five schema corrections from review, before any migration runs:**
+
+1. `incidents.baseline_median` -> `baseline_mean`. Leftover from the
+   original MAD framing; this detector tracks an EWMA mean, never a
+   median (the correction two sections above).
+
+2. **Ordering: strict `window_end` ASC, with an explicit lag buffer
+   and an explicit skip-and-report path - not just an intention.** The
+   EWMA recursion is order-dependent - applying two windows' updates
+   in the wrong relative order produces a different, wrong `ewma_mean`
+   /`ewma_mad` than applying them correctly, unlike a commutative
+   aggregate (a sum) where arrival order wouldn't matter. Two distinct
+   lateness concerns, not one: (a) Kafka-to-window event-time
+   lateness, already resolved by `metrics_job.sql`'s own watermark
+   (270s bound, DEFENSE.md #40/#42) before a row ever reaches
+   `weir_metrics.window_metrics` - a window that closes has, by
+   construction, already absorbed everything the watermark was willing
+   to wait for; (b) **write-order lateness at the Postgres-ingestion
+   boundary** - nothing guarantees the JDBC sink's flush/commit order
+   across different windows matches strict `window_end` order (sink
+   batching, checkpoint timing, a restart re-emitting buffered writes).
+   It's (b) this detector's own read loop has to defend against, not
+   (a) - #40's p999 (11,309s) describes Kafka-arrival disorder that's
+   already resolved by the time a row exists in `window_metrics`.
+   Mechanism: each read cycle queries `window_metrics` rows not yet in
+   `scored_windows`, computes `max_window_end_seen`, and only processes
+   rows with `window_end <= max_window_end_seen - max_lag_seconds`
+   (a new config value; default reasoned, not measured against #40's
+   number, below), strictly in ascending `window_end` order, one
+   transaction per window (per #45's existing idempotency design). A
+   row that's still older than `detector_progress.last_processed_
+   window_end` when it's finally read - i.e., it arrived so late even
+   the lag buffer didn't hold long enough - gets a `scored_windows` row
+   with `status = 'skipped_late'`, `score = NULL`, never applied to
+   `baseline_state`'s EWMA. Counted and visible (V8), never silently
+   dropped. `max_lag_seconds` default: a few minutes, reasoned from
+   typical JDBC-sink-flush/checkpoint cadences (the write-order
+   concern this buffer actually exists for), not from #40's Kafka-
+   level p999 - that number belongs to a layer of the pipeline this
+   detector never sees directly.
+
+3. **`scored_windows.status IN ('scored', 'insufficient_baseline',
+   'skipped_late')`, `score`/`baseline_mean_at_time`/
+   `baseline_scale_at_time` all nullable, one row written in every
+   case.** Without this, the 8-week warmup period (DEFENSE.md #44) is
+   an accounting hole - windows that were seen but never scored would
+   leave no trace at all, and a benchmark computed only from `scored`
+   rows would silently undercount the denominator. Every window that
+   clears the ordering/lag check gets exactly one `scored_windows` row,
+   whichever of the three outcomes applies.
+
+4. **`baseline_state.alpha` and `.config_hash`, checked on every
+   update, failing loudly on mismatch.** `alpha` is the actual
+   numeric EWMA decay derived from `half_life_weeks` (DEFENSE.md #44);
+   `config_hash` is a hash of the full baseline-relevant config.
+   Stored per-bucket-row (redundant across all 168 rows for one
+   `detector_name`, not centralized) so any single row is self-
+   describing in isolation and a partially-corrupted state is still
+   individually checkable. If a config change (e.g. a different
+   `half_life_weeks`) is deployed against an already-warmed baseline,
+   the mismatch is detected and raised explicitly, rather than
+   silently continuing to update a baseline that's now a blend of two
+   different decay rates matching neither config.
+
+5. **`TIMESTAMPTZ`, not naive `TIMESTAMP`, in every `weir_incidents`
+   table - scoped to this new schema, not a retroactive fix to
+   `weir_metrics`.** `weir_metrics.window_metrics` (Part 3.1, already
+   5/5-verified) stores naive `TIMESTAMP` throughout and isn't being
+   touched here - re-opening an already-shipped, verified component
+   is a bigger, separate decision, not bundled into this one. Instead,
+   the volume detector's own reading adapter is the one place that
+   explicitly states and applies a timezone: `window_metrics.
+   window_start` is interpreted as America/New_York local civil time
+   (`AT TIME ZONE 'America/New_York'`, converting to a true UTC
+   instant) *before* being stored as `TIMESTAMPTZ` in `weir_incidents`
+   and before `bucket_weekday`/`bucket_hour` are derived from it.
+   Bucketing in UTC instead was considered and rejected: the entire
+   reason for (weekday, hour) bucketing is to capture genuine
+   behavioral seasonality (rush hour, overnight lulls) that people
+   observe in *local* civil time, not UTC - a UTC hour bucket would
+   mix two different local hours across the EST/EDT boundary,
+   blurring exactly the seasonality this detector exists to isolate.
+   **The DST fall-back's ambiguous hour (DEFENSE.md #44) recurs here,
+   at a second place in the pipeline**: `replay_producer.py` and
+   `metrics_job.sql` don't exclude it the way `load_pickup_
+   timestamps.py` does, so `window_metrics` still contains that hour's
+   data with no recoverable true UTC offset. Rather than lean on
+   Postgres's own (unverified, implementation-specific) default
+   disambiguation for an ambiguous `AT TIME ZONE` conversion, the
+   reading adapter applies #44's same policy a second time: those
+   specific windows are excluded from `baseline_state` updates,
+   explicitly, not guessed at. The inconsistency this exposes -
+   `load_pickup_timestamps.py` excludes the ambiguous hour,
+   `replay_producer.py`/`metrics_job.sql` don't - is a real gap,
+   logged in docs/FUTURE_WORK.md rather than silently left
+   unaddressed, and not fixed here since it touches an already-
+   verified upstream component out of this task's scope.
+
+**Four more corrections from a second review pass, applied to
+`reliability/store/incidents_schema.sql` before any migration ran:**
+
+1. `scored_windows_status_valid` CHECK, enforcing the three-value enum
+   at the database level. Free-text `status` means a typo creates a
+   silent fourth category and corrupts the V8 accounting it exists to
+   support - documenting the three valid values in a comment isn't
+   the same as making a fourth one impossible to write.
+
+2. `scored_windows_null_contract` CHECK, made a real biconditional.
+   The first draft only checked one direction (`status <> 'scored'`
+   implies all three NULL) and would have silently allowed a `'scored'`
+   row with a NULL `score` straight through - the exact gap this
+   constraint exists to close. Fixed to require both directions:
+   `'scored'` implies all three NOT NULL, anything else implies all
+   three NULL.
+
+3. Range CHECKs (`bucket_weekday BETWEEN 0 AND 6`,
+   `bucket_hour BETWEEN 0 AND 23`) on every table that has these
+   columns - `incidents`' version is NULL-aware since a future non-
+   bucketed detector type may not populate them at all. Catches a
+   timezone-conversion off-by-one (America/New_York vs UTC, DEFENSE.md
+   #45) at write time, as a rejected INSERT, instead of as an
+   inexplicable baseline discovered much later.
+
+4. `detector_progress.last_processed_window_end` (and
+   `baseline_state.last_window_end`) changed from nullable to a
+   `NOT NULL DEFAULT`. Nullable was a real bug waiting to happen: SQL's
+   three-valued logic makes `window_end <= NULL` evaluate to NULL, not
+   a real answer either way, and the equivalent comparison in
+   application code (against a Python `None`) would raise rather than
+   silently misbehave - but either way, "what happens on a detector's
+   very first window" would have been an unstated edge case discovered
+   by accident, not a decision made on purpose. A real, ordinary
+   comparable sentinel removes the ambiguity structurally: every
+   genuine `window_end` is trivially greater than it, so "is this
+   window behind the frontier" has exactly one correct, structural
+   answer (no) on a brand-new detector - no separate NULL-handling
+   branch needed anywhere in the comparison logic, and the default
+   lives on the column itself, not in application code that could be
+   called in an unexpected order.
+
+   **First choice, `'-infinity'::timestamptz`, was wrong - caught by
+   checking psycopg 3's own documentation before shipping it, not
+   after.** Confirmed (not assumed): psycopg 3, unlike psycopg2,
+   raises `DataError` by default when reading Postgres's
+   `'infinity'`/`'-infinity'` timestamp special values back into
+   Python, rather than mapping them to `datetime.min`/`max` the way
+   psycopg2 did. Given #45 already approved psycopg 3 as this
+   detector's Postgres client, the very first `SELECT` of this column
+   would have crashed - a sentinel that breaks the one thing it exists
+   to make safe. Switched to the Unix epoch
+   (`'1970-01-01T00:00:00+00'::timestamptz`) instead: an ordinary,
+   fully representable instant with no special-casing in any driver,
+   and - since every real TLC `window_end` starts in Oct 2024 - just
+   as reliably "less than any real window this system will ever see"
+   as `-infinity` was meant to be.

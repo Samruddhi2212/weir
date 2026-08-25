@@ -1,0 +1,43 @@
+name: Incidents Schema Verification (Part 4.1)
+
+# Manual trigger only, matching metrics-store-verify.yml's pattern.
+# Postgres-only - no Kafka/Flink/Iceberg needed, this schema has no
+# dependency on any of them.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  verify:
+    name: Apply reliability/store/incidents_schema.sql and verify its constraints actually reject bad writes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install psycopg
+        run: pip install -r reliability/volume/requirements.txt
+      - name: Start Postgres only
+        run: docker compose up -d postgres
+      - name: Wait for Postgres healthy
+        run: |
+          for i in $(seq 1 30); do
+            line="$(docker compose ps | grep '^weir-postgres[[:space:]]' || true)"
+            if [ -n "$line" ] && echo "$line" | grep -q "(healthy)"; then
+              echo "postgres is healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "postgres never became healthy"
+          docker compose logs postgres
+          exit 1
+      - name: Run verify_incidents_schema.py
+        run: python -u scripts/verify_incidents_schema.py --port "${POSTGRES_PORT:-5432}"
+      - name: Show Postgres logs on failure
+        if: failure()
+        run: docker compose logs postgres
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
