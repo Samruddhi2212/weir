@@ -2225,6 +2225,28 @@ checkpoint count was not, on its own, enough to conclude the job was
 producing correct output - it only proves the job is alive, not that
 data is flowing through to the sink.
 
+**Found next via CI: the UNNEST(ARRAY[ROW(...), ...]) mechanism this
+entry originally chose was itself wrong.** With the idle-timeout fix
+in place, the job ran, checkpointed, and the wide row landed in
+`window_metrics_wide` - but Postgres's own log showed the trigger
+failing on every invocation: `ERROR: function return row and
+query-specified return row do not match`. This is a genuine Postgres
+composite-type inference limitation, not a typo: building an array
+from many separate anonymous `ROW(...)` constructors doesn't reliably
+resolve to one uniform composite type Postgres can then `UNNEST(...)
+AS m(column_name text, metric_name text, metric_value double
+precision)` against, even when every individual field looks
+correctly typed. The real irony: this entry rejected pivoting inside
+*Flink* SQL specifically because novel syntax there kept finding
+bugs, then hit the equivalent problem on the Postgres side instead -
+"battle-tested" was true of `UNNEST(ARRAY[...])` on simple arrays, not
+of this specific many-anonymous-ROW-literals usage of it. Fixed by
+switching to a literal `VALUES (...), (...), ...) AS m(cols)` list -
+each column's type unifies independently down its own column instead
+of needing one shared row type across all 69 entries, which is
+exactly what a fixed, known-shape tuple list needs and has no
+equivalent ambiguity.
+
 ## 43. Flink's JDBC connector jars target Flink 2.0.0, not this
 project's 2.1.0 - stated explicitly, not left implicit
 
