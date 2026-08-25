@@ -2186,6 +2186,22 @@ table's column list is exactly #41's metric list - this entry is
 about the mechanism that gets that list into the narrow schema, not a
 revision of what the list contains.
 
+**Found via CI, not caught beforehand: `INTERVAL '270' SECOND` needs
+`SECOND(3)`.** The first real submission of this job (after #43's jar
+gap was already fixed and verified separately) failed at parse time:
+`org.apache.calcite.sql.validate.SqlValidatorException: Interval
+field value 270 exceeds precision of SECOND(2) field`. Calcite's
+interval-literal grammar - which Flink SQL uses as-is, including
+inside a `WATERMARK FOR` clause - defaults an unqualified `SECOND` to
+2-digit precision; 270 needs three. Confirmed against Calcite's own
+`SqlIntervalQualifier` javadoc before applying the fix
+(`INTERVAL '270' SECOND(3)`), not guessed from the error text alone.
+Caught specifically because `verify_metrics_job.py`'s own stdout
+buffering (a separate, real gap - CPython fully block-buffers a
+piped, non-tty stdout by default) was fixed first: the initial CI
+failure showed zero diagnostic output, and only reran with `python
+-u` did the actual Calcite exception become visible at all.
+
 ## 43. Flink's JDBC connector jars target Flink 2.0.0, not this
 project's 2.1.0 - stated explicitly, not left implicit
 

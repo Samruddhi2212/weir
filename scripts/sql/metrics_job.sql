@@ -50,7 +50,13 @@ CREATE TABLE weir_tlc_trips_source (
   -- DEFENSE.md #40's measured p99 bound (270s), not a fresh number -
   -- the "20/2000 (1.0%) dropped as too-late" cost already quantified
   -- there is this watermark's real, known cost.
-  WATERMARK FOR `tpep_pickup_datetime` AS `tpep_pickup_datetime` - INTERVAL '270' SECOND
+  -- SECOND with no explicit precision defaults to SECOND(2) (max 2
+  -- digits) in Calcite's interval-literal grammar, which Flink SQL
+  -- uses as-is - 270 needs SECOND(3). Found the hard way: the first
+  -- real CI run failed with "Interval field value 270 exceeds
+  -- precision of SECOND(2) field", confirmed against Calcite's own
+  -- SqlIntervalQualifier docs before fixing, not guessed.
+  WATERMARK FOR `tpep_pickup_datetime` AS `tpep_pickup_datetime` - INTERVAL '270' SECOND(3)
 ) WITH (
   'connector' = 'kafka',
   'topic' = '__WEIR_METRICS_TOPIC__',
