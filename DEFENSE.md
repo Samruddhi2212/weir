@@ -2225,6 +2225,25 @@ checkpoint count was not, on its own, enough to conclude the job was
 producing correct output - it only proves the job is alive, not that
 data is flowing through to the sink.
 
+**Constraint on any future change to this job: the fix is idleness
+detection, not parallelism pinned to 1, and not a partition-count
+change.** Two other "fixes" would have made this specific CI run pass
+just as well: setting this job's parallelism to 1 (matching the test
+topic's single partition), or giving the test topic more partitions.
+Neither was chosen, and neither is an acceptable substitute for
+`table.exec.source.idle-timeout` going forward - both only remove the
+*symptom* for this one topic's current shape, and would silently
+reintroduce the exact same bug the moment a real deployment's Kafka
+topic has more partitions than this job's parallelism, or an uneven
+partition-to-subtask assignment (both routine in production Kafka,
+not edge cases). `table.exec.source.idle-timeout` is the only one of
+the three that stays correct regardless of how partitions and
+parallelism relate to each other. Any future change to this job's
+parallelism, or to the source topic's partition count, must keep this
+setting - removing it would not fail loudly, it would silently
+reintroduce this exact bug (every window blocked forever) with no
+error in the logs, exactly as it did before this was diagnosed.
+
 **Found next via CI: the UNNEST(ARRAY[ROW(...), ...]) mechanism this
 entry originally chose was itself wrong.** With the idle-timeout fix
 in place, the job ran, checkpointed, and the wide row landed in
