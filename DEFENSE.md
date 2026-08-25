@@ -2266,6 +2266,21 @@ of needing one shared row type across all 69 entries, which is
 exactly what a fixed, known-shape tuple list needs and has no
 equivalent ambiguity.
 
+**Verified 5/5, not trusted on one pass.** All four bugs above were
+found and fixed across several individually-failing CI runs; once the
+trigger fix landed, `.github/workflows/metrics-job-verify.yml` was run
+5 consecutive times (run IDs 32844933111, 32845312440, 32845730285,
+32846100518, 32846483857) - 5/5 green, each one independently
+rebuilding the Flink image from scratch, replaying real TLC data, and
+running both the deep check (all 69 `column_metrics` values plus
+`window_metrics.row_count` for one specific window, exact match
+against ground truth computed independently from the source parquet)
+and the broad check (`SUM(row_count)` across every closed window
+exactly matching an independently-computed expected count from the
+emission log). Neither check has ever passed on a fluke - every
+value compared is either an exact integer/float match or the run
+fails loudly.
+
 ## 43. Flink's JDBC connector jars target Flink 2.0.0, not this
 project's 2.1.0 - stated explicitly, not left implicit
 
