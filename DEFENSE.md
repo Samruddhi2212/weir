@@ -2202,6 +2202,29 @@ piped, non-tty stdout by default) was fixed first: the initial CI
 failure showed zero diagnostic output, and only reran with `python
 -u` did the actual Calcite exception become visible at all.
 
+**Found next via CI: an idle parallel source subtask blocked every
+window from ever firing.** With the interval fix in place, the job
+submitted and ran cleanly - checkpoints completed every ~10s for the
+full 180s wait, no errors - but no window ever landed in Postgres.
+`verify_metrics_job.py`'s test topic has 1 partition; this job's
+parallelism was left at its default (2, visible in the JobManager log
+as subtasks "(1/2)"/"(2/2)"). Only one subtask ever gets the single
+partition assigned; the other is idle from the start, and Flink's
+merged watermark is the *minimum* across all parallel source
+subtasks - an idle subtask that never advances its own watermark
+holds every window open indefinitely, regardless of how much real
+data flows through the active one. This is a documented Flink
+behavior (confirmed against the Kafka connector docs' own "Source
+Per-Partition Watermarks" section and cross-checked against
+`table.exec.source.idle-timeout`'s entry in Flink's table-config docs:
+type Duration, default `0 ms` - disabled unless set), not something
+guessed from the symptom alone. Fix: `SET
+'table.exec.source.idle-timeout' = '5s';` added alongside the other
+session-scoped `SET`s already in this file. A steadily-completing
+checkpoint count was not, on its own, enough to conclude the job was
+producing correct output - it only proves the job is alive, not that
+data is flowing through to the sink.
+
 ## 43. Flink's JDBC connector jars target Flink 2.0.0, not this
 project's 2.1.0 - stated explicitly, not left implicit
 

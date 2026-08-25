@@ -25,6 +25,17 @@ SET 'execution.runtime-mode' = 'streaming';
 SET 'sql-client.execution.result-mode' = 'TABLEAU';
 SET 'execution.checkpointing.interval' = '__WEIR_METRICS_CHECKPOINT_INTERVAL__';
 SET 'execution.checkpointing.min-pause' = '0s';
+-- The verify_metrics_job.py test topic has 1 partition; this job's
+-- default parallelism is 2 (unset). The unassigned source subtask is
+-- idle forever and, by default, its watermark never advances past
+-- its initial value - since the merged watermark is the MINIMUM
+-- across all parallel source subtasks, that one idle subtask holds
+-- every window open forever, even though the other subtask has real
+-- data flowing through it and checkpoints keep completing normally.
+-- Found the hard way (checkpoints completed steadily for 180s, no
+-- window ever fired) - confirmed against Flink's own table-config
+-- docs before applying (default is 0ms = disabled).
+SET 'table.exec.source.idle-timeout' = '5s';
 
 CREATE TABLE weir_tlc_trips_source (
   `VendorID` INT,
