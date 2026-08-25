@@ -99,13 +99,21 @@ CREATE TABLE IF NOT EXISTS weir_incidents.scored_windows (
     window_end              TIMESTAMPTZ NOT NULL,
     bucket_weekday          SMALLINT NOT NULL,
     bucket_hour             SMALLINT NOT NULL,
-    -- 'scored': baseline was warm enough, EWMA updated, score computed.
-    -- 'insufficient_baseline': below min_observations - baseline_state
-    --   still NOT updated with this window (see reading adapter logic;
-    --   an under-warmed bucket must not count toward its own warmup
-    --   via a half-trusted update).
+    -- 'scored': baseline was ALREADY warm enough (checked against
+    --   this bucket's observation_count BEFORE this window's own
+    --   update), so a score was computed against the pre-update
+    --   ewma_mean/ewma_mad - then this window's own EWMA update is
+    --   applied, same as any other processed window.
+    -- 'insufficient_baseline': baseline was not yet warm enough at
+    --   the time of this window - no score computed - but this
+    --   window's EWMA update IS still applied to baseline_state
+    --   (observation_count increments regardless of status; this is
+    --   the only way warmup ever progresses at all - a bucket that
+    --   never updated until it was already warm could never become
+    --   warm in the first place).
     -- 'skipped_late': arrived behind detector_progress's frontier -
-    --   never applied to baseline_state, counted per V8, not dropped.
+    --   the ONE status that does NOT update baseline_state at all -
+    --   counted per V8, not dropped.
     status                  TEXT NOT NULL,
     observed_value          DOUBLE PRECISION NOT NULL,
     baseline_mean_at_time   DOUBLE PRECISION,
