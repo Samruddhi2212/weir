@@ -57,3 +57,32 @@ directories or files exist for these.
   deferred as a "todo" so much as: this repo never intends to build its
   own credential/identity management for local SeaweedFS — that problem
   is solved by the cloud provider once this moves off Docker Compose.
+
+- **Volume detector's sensitivity sweep can't vary `alpha` cheaply** —
+  `weir_incidents.scored_windows` stores enough (`observed_value`,
+  `baseline_mean_at_time`, `baseline_scale_at_time`) to re-derive a score
+  at a different *threshold* as a pure SQL exercise, no baseline rewarm
+  needed (DEFENSE.md #45). Varying `alpha` (the EWMA decay rate) is a
+  different story: `alpha` controls how `ewma_mean`/`ewma_mad` themselves
+  accumulate over time, so a different `alpha` value produces a genuinely
+  different baseline trajectory, not just a different comparison against
+  an already-computed one — there's no way to derive "what would the
+  baseline have looked like under a different alpha" from data computed
+  under the original alpha. A sweep over `alpha` needs a full 8-week
+  rewarm per sweep point, same as the Flink-keyed-state alternative that
+  was rejected for exactly this cost (DEFENSE.md #45). Threshold sweeps
+  are cheap; alpha sweeps aren't — a real, stated limitation of this
+  design, not an oversight.
+
+- **`replay_producer.py`/`metrics_job.sql` don't exclude the DST
+  fall-back's ambiguous hour (Nov 3 2024, 01:00–01:59 local) the way
+  `load_pickup_timestamps.py` does** (DEFENSE.md #44/#45) — so
+  `weir_metrics.window_metrics` still contains that hour's data with no
+  recoverable true UTC offset. The volume detector's reading adapter
+  works around this by excluding those specific windows a second time,
+  at its own ingestion boundary, rather than trusting an unverified
+  default disambiguation. The inconsistency itself — one loader excludes
+  the ambiguous hour, the live replay/metrics pipeline doesn't — is real
+  and unaddressed; fixing it means touching `replay_producer.py` and/or
+  `metrics_job.sql`, both already shipped and 5/5-verified (Part 2.1/3.1),
+  which is a bigger, separate decision than this detector's own scope.
