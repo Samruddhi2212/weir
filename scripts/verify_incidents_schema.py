@@ -39,10 +39,15 @@ def apply_sql_file(conn, path):
     conn.commit()
 
 
-def expect_check_violation(conn, label, sql, params=()):
+def expect_check_violation(conn, label, sql, params=(), expected_constraint=None):
     """Runs sql expecting a CheckViolation; rolls back either way so
     the failed attempt never persists. Fails loudly if no exception,
-    or the wrong exception class, was raised."""
+    the wrong exception class, or (when expected_constraint is given)
+    the wrong constraint fired - a test row that happens to violate
+    two constraints at once would otherwise "pass" for the wrong
+    reason, exactly as a first draft of this script's very first
+    check did (rejected by scored_windows_null_contract while
+    claiming to test scored_windows_status_valid)."""
     try:
         with conn.cursor() as cur:
             cur.execute(sql, params)
@@ -50,7 +55,14 @@ def expect_check_violation(conn, label, sql, params=()):
         fail(f"{label}: expected a CheckViolation, but the INSERT succeeded")
     except pg_errors.CheckViolation as e:
         conn.rollback()
-        print(f"PASS: {label} - rejected as expected ({e.diag.constraint_name})")
+        actual_constraint = e.diag.constraint_name
+        if expected_constraint is not None and actual_constraint != expected_constraint:
+            fail(
+                f"{label}: expected constraint '{expected_constraint}' to fire, "
+                f"but '{actual_constraint}' fired instead - this test row violates "
+                f"more than one constraint and isn't isolating the one it claims to"
+            )
+        print(f"PASS: {label} - rejected as expected ({actual_constraint})")
     except Exception as e:
         conn.rollback()
         fail(f"{label}: expected CheckViolation, got {type(e).__name__}: {e}")
@@ -110,13 +122,18 @@ def main():
     expect_check_violation(
         conn, "scored_windows_status_valid rejects an invalid status",
         insert_scored_windows_sql(),
-        ("volume", ws, we, 0, 15, "bogus_status", 100.0, 90.0, 5.0, 2.0),
+        # baseline_mean_at_time/baseline_scale_at_time/score all NULL -
+        # satisfies null_contract's "not scored -> all NULL" branch on
+        # its own, so ONLY status_valid is what this row can violate.
+        ("volume", ws, we, 0, 15, "bogus_status", 100.0, None, None, None),
+        expected_constraint="scored_windows_status_valid",
     )
 
     expect_check_violation(
         conn, "scored_windows_null_contract rejects status='scored' with a NULL score",
         insert_scored_windows_sql(),
         ("volume", ws, we, 0, 15, "scored", 100.0, 90.0, 5.0, None),
+        expected_constraint="scored_windows_null_contract",
     )
 
     expect_check_violation(
@@ -124,18 +141,21 @@ def main():
               "(the exact gap the first draft's one-directional CHECK left open)",
         insert_scored_windows_sql(),
         ("volume", ws, we, 0, 15, "insufficient_baseline", 100.0, None, None, 2.0),
+        expected_constraint="scored_windows_null_contract",
     )
 
     expect_check_violation(
         conn, "scored_windows_weekday_range rejects bucket_weekday=7",
         insert_scored_windows_sql(),
         ("volume", ws, we, 7, 15, "insufficient_baseline", 100.0, None, None, None),
+        expected_constraint="scored_windows_weekday_range",
     )
 
     expect_check_violation(
         conn, "scored_windows_hour_range rejects bucket_hour=24",
         insert_scored_windows_sql(),
         ("volume", ws, we, 0, 24, "insufficient_baseline", 100.0, None, None, None),
+        expected_constraint="scored_windows_hour_range",
     )
 
     expect_check_violation(
@@ -143,6 +163,24 @@ def main():
         "INSERT INTO weir_incidents.baseline_state "
         "(detector_name, bucket_weekday, bucket_hour, alpha, config_hash) VALUES (%s, %s, %s, %s, %s)",
         ("volume", -1, 15, 0.001, "deadbeef"),
+        expected_constraint="baseline_state_weekday_range",
+    )
+
+    expect_check_violation(
+        conn, "baseline_state_hour_range rejects bucket_hour=24",
+        "INSERT INTO weir_incidents.baseline_state "
+        "(detector_name, bucket_weekday, bucket_hour, alpha, config_hash) VALUES (%s, %s, %s, %s, %s)",
+        ("volume", 0, 24, 0.001, "deadbeef"),
+        expected_constraint="baseline_state_hour_range",
+    )
+
+    expect_check_violation(
+        conn, "incidents_weekday_range rejects bucket_weekday=7 even though the column is nullable",
+        "INSERT INTO weir_incidents.incidents "
+        "(detector_name, window_start, window_end, bucket_weekday, bucket_hour, observed_value, score) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        ("volume", ws, we, 7, 15, 100.0, 4.0),
+        expected_constraint="incidents_weekday_range",
     )
 
     expect_check_violation(
@@ -151,6 +189,7 @@ def main():
         "(detector_name, window_start, window_end, bucket_weekday, bucket_hour, observed_value, score) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s)",
         ("volume", ws, we, 0, 99, 100.0, 4.0),
+        expected_constraint="incidents_hour_range",
     )
 
     expect_success(

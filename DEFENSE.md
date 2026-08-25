@@ -2801,3 +2801,35 @@ detector's streaming design exists to avoid.
    and - since every real TLC `window_end` starts in Oct 2024 - just
    as reliably "less than any real window this system will ever see"
    as `-infinity` was meant to be.
+
+**Two more real bugs, both caught while designing the detector core -
+before either reached actual detector code:**
+
+- **`scored_windows`'s own comment claimed `'insufficient_baseline'`
+  windows don't update `baseline_state` - wrong, and self-
+  contradictory.** If an under-warmed bucket's own windows never
+  updated `baseline_state`, `observation_count` could never reach
+  `min_observations` and the bucket could never warm up at all - a
+  chicken-and-egg bug in the schema's own documentation, not the
+  constraints. Corrected: every status except `'skipped_late'` updates
+  `baseline_state` (the warmup check happens against the bucket's
+  observation count *before* this window's own update is applied, so
+  `'scored'` means "was already warm," not "became warm just now").
+  `'skipped_late'` is the one status that never touches
+  `baseline_state`.
+
+- **The CI run that verified `scored_windows_status_valid` was
+  actually testing the wrong constraint.** Confirmed via 5/5-style
+  discipline applied to the CI output itself, not just its overall
+  conclusion: the test's own success message named
+  `scored_windows_null_contract` as the constraint that actually
+  fired, not `scored_windows_status_valid` as claimed - the test row
+  (`status='bogus_status'` with non-NULL `baseline_mean_at_time`/
+  `baseline_scale_at_time`/`score`) violated both constraints at once,
+  and Postgres reported whichever it evaluated first. Fixed two ways:
+  the row now sets all three nullable columns to NULL (satisfying
+  `null_contract`'s "not scored" branch on its own, isolating
+  `status_valid` as the only constraint left to violate), and
+  `expect_check_violation()` now takes an `expected_constraint`
+  argument and fails if the wrong one fires - so a test that passes
+  for the wrong reason can't happen silently a second time.
