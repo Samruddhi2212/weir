@@ -1,0 +1,116 @@
+name: Metrics Job Verification (Part 3.1)
+
+# Manual trigger only, matching this session's other workflow_dispatch
+# jobs. Needs Kafka, Postgres, and Flink - no Iceberg/SeaweedFS, since
+# this job's JDBC sink never touches Iceberg (DEFENSE.md #42).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  verify:
+    name: Rebuild Flink image, verify JDBC jars, run the metrics job against real data
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pyarrow and kafka-python
+        run: pip install pyarrow kafka-python==3.0.11
+      - name: Build Flink image (picks up docker/flink/Dockerfile changes)
+        run: docker compose build flink-jobmanager flink-taskmanager
+      - name: Start Kafka, Postgres, Flink
+        run: docker compose up -d kafka postgres flink-jobmanager flink-taskmanager
+      - name: Wait for services healthy
+        run: |
+          EXPECTED_SERVICES="weir-kafka weir-postgres weir-flink-jobmanager weir-flink-taskmanager"
+          WAITED=0
+          MAX_WAIT=180
+          while true; do
+            PS_OUTPUT="$(docker compose ps)"
+            all_healthy=1
+            for svc in $EXPECTED_SERVICES; do
+              line="$(echo "$PS_OUTPUT" | grep "^$svc[[:space:]]" || true)"
+              if [ -z "$line" ] || ! echo "$line" | grep -q "(healthy)"; then
+                all_healthy=0
+                break
+              fi
+            done
+            [ "$all_healthy" -eq 1 ] && break
+            WAITED=$((WAITED + 5))
+            if [ "$WAITED" -ge "$MAX_WAIT" ]; then
+              echo "$PS_OUTPUT"
+              docker compose logs kafka postgres flink-jobmanager flink-taskmanager
+              echo "FAIL: not all of [$EXPECTED_SERVICES] healthy after ${MAX_WAIT}s"
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "$PS_OUTPUT"
+      - name: Verify JDBC connector jars are present in the built image
+        # DEFENSE.md #43: checked inside the actual running container,
+        # mounts and all - not just a bare docker build layer. Exact
+        # filename match (V1), not a loose grep.
+        run: |
+          LIB_LISTING="$(docker compose exec -T flink-jobmanager ls /opt/flink/lib)"
+          echo "$LIB_LISTING"
+          echo "$LIB_LISTING" | grep -qF "flink-connector-jdbc-core-4.0.0-2.0.jar" \
+            || { echo "FAIL: flink-connector-jdbc-core-4.0.0-2.0.jar missing from /opt/flink/lib"; exit 1; }
+          echo "$LIB_LISTING" | grep -qF "flink-connector-jdbc-postgres-4.0.0-2.0.jar" \
+            || { echo "FAIL: flink-connector-jdbc-postgres-4.0.0-2.0.jar missing from /opt/flink/lib"; exit 1; }
+          echo "$LIB_LISTING" | grep -qF "postgresql-42.7.13.jar" \
+            || { echo "FAIL: postgresql-42.7.13.jar missing from /opt/flink/lib"; exit 1; }
+          echo "PASS: all three jars present in the running container"
+      - name: Verify the JDBC connector actually loads (not just present as bytes)
+        # A minimal SQL Client round-trip: create a jdbc-connector sink
+        # against the real Postgres service, insert one literal row,
+        # confirm it landed via psql. Proves the connector factory is
+        # registered and functional, not just that the jar file exists.
+        run: |
+          docker compose exec -T postgres psql -U weir -d weir_catalog -c \
+            "CREATE TABLE IF NOT EXISTS public.weir_jdbc_smoke_test (id INT PRIMARY KEY, note TEXT);"
+          cat > /tmp/jdbc_smoke.sql << 'EOF'
+          SET 'table.dml-sync' = 'true';
+          CREATE TABLE jdbc_smoke_sink (
+            id INT,
+            note STRING,
+            PRIMARY KEY (id) NOT ENFORCED
+          ) WITH (
+            'connector' = 'jdbc',
+            'url' = 'jdbc:postgresql://postgres:5432/weir_catalog',
+            'table-name' = 'public.weir_jdbc_smoke_test',
+            'username' = 'weir',
+            'password' = 'weir'
+          );
+          INSERT INTO jdbc_smoke_sink VALUES (1, 'jdbc connector loaded');
+          EOF
+          docker compose cp /tmp/jdbc_smoke.sql flink-jobmanager:/tmp/jdbc_smoke.sql
+          timeout 90 docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /tmp/jdbc_smoke.sql
+          SMOKE_EXIT=$?
+          if [ "$SMOKE_EXIT" -ne 0 ]; then
+            docker compose logs flink-jobmanager flink-taskmanager
+            echo "FAIL: jdbc smoke test sql-client exited $SMOKE_EXIT"
+            exit 1
+          fi
+          RESULT="$(docker compose exec -T postgres psql -t -A -U weir -d weir_catalog -c \
+            "SELECT id, note FROM public.weir_jdbc_smoke_test WHERE id = 1;" | tr -d '\r')"
+          echo "row in postgres: [$RESULT]"
+          if [ "$RESULT" != "1|jdbc connector loaded" ]; then
+            echo "FAIL: expected '1|jdbc connector loaded', got '$RESULT'"
+            exit 1
+          fi
+          echo "PASS: JDBC connector is loadable and functional end-to-end"
+      - name: Download NYC TLC Yellow Taxi data (2025-01)
+        run: python ingestion/replay/download_tlc_data.py --year-month 2025-01 --output-dir data/tlc
+      - name: Run the full metrics job verification
+        run: |
+          python scripts/verify_metrics_job.py \
+            --input data/tlc/yellow_tripdata_2025-01.parquet \
+            --bootstrap-server localhost:${KAFKA_EXTERNAL_PORT:-29092}
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs kafka postgres flink-jobmanager flink-taskmanager
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

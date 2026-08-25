@@ -2106,3 +2106,129 @@ exactly one stored ground truth per fact (the broker's delivery
 callback, not "we called send()"; the running-max lateness
 definition, not a second wall-clock one) - this is the same principle
 applied to the metrics store.
+
+## 42. Part 3.1: the Flink job - wide staging table + Postgres trigger,
+not a Flink-side pivot
+
+Written before `scripts/sql/metrics_job.sql`, per D1. #41 decided
+*what* gets computed and *where* it's stored; this entry decides the
+mechanism that gets a windowed aggregation with ~70 metric values
+(19 null counts, 6 distinct counts, 6 negative counts, 12 x 3
+min/max/mean, 2 duration-derived counts, plus `row_count`) from one
+Flink SQL query into `column_metrics`'s narrow (one-row-per-metric)
+shape.
+
+**Real alternative considered and rejected: pivot inside Flink SQL,
+via `CROSS JOIN UNNEST(ARRAY[ROW(...), ROW(...), ...])`.** Confirmed
+this syntax is real (Flink's array-of-ROW literals plus
+`UNNEST`/`CROSS JOIN` to explode them into rows is documented,
+verified via the Ververica SQL cookbook and Flink's own docs, not
+guessed) - so it would work. Rejected anyway: this session's actual
+track record is that every genuinely novel piece of Flink SQL syntax
+tried so far (the Iceberg-catalog connector-property absorption in
+DEFENSE.md #33, the JSON timestamp format needed below) has surfaced
+a real bug on first contact, and a single ~70-entry array-of-ROW
+literal, hand-written and never run until CI, is exactly the shape of
+thing likely to hide a transcription error in the one place (a
+70-way melt) that's hardest to spot-check by eye.
+
+**Decision: Flink writes one wide row per window; Postgres reshapes
+it.** The Flink SQL job does nothing but the parts of standard SQL
+this project already has real, working experience with this
+session - a Kafka source, a watermark, a `TUMBLE` window, a
+`GROUP BY` with aggregate functions - and sinks the wide result via
+the JDBC connector's upsert mode (real, documented: a JDBC sink table
+with a `PRIMARY KEY` in its DDL performs `INSERT ... ON CONFLICT DO
+UPDATE`, not append-only) into a new staging table,
+`weir_metrics.window_metrics_wide`, keyed on `(window_start,
+window_end)`. A Postgres trigger (`AFTER INSERT OR UPDATE`) on that
+table fans each wide row out into `window_metrics` (the fixed
+columns) and `column_metrics` (via Postgres's own
+`UNNEST(ARRAY[...])`, which - unlike the Flink-side version above -
+this project can rely on without a first-contact-bug tax; it's
+mature, ubiquitous Postgres syntax). This also means the melt logic
+lives in a schema migration, not a Flink job redeploy, if a metric's
+definition ever needs to change.
+
+**Watermark bound: 270 seconds - #40's measured p99, not a new
+number.** `WATERMARK FOR tpep_pickup_datetime AS
+tpep_pickup_datetime - INTERVAL '270' SECOND`. Reusing the bound
+DEFENSE.md #40 already measured and justified (rather than picking a
+fresh one here) means the two design phases agree with each other by
+construction, and the "20/2000 events (1.0%) dropped as too-late"
+cost #40 already quantified is the real, known cost of this exact
+value - not a second guess that would need its own justification.
+
+**Timestamp parsing: `json.timestamp-format.standard = 'ISO-8601'`,
+verified against Flink's own docs, not assumed.** `replay_producer.py`
+serializes `tpep_pickup_datetime`/`tpep_dropoff_datetime` via Python's
+`datetime.isoformat()` (DEFENSE.md #38's `_json_default`), producing
+`T`-separated strings like `"2024-12-31T20:47:55"` - confirmed by
+actually loading a real row and printing its serialized JSON, not
+assumed from reading the code alone. Flink's JSON format connector
+defaults to the SQL style (space-separated) and requires this option
+set explicitly to parse the `T`-separated form Flink calls
+`'ISO-8601'`. Also confirmed (via `pyarrow.compute.microsecond`
+against the full real January 2025 file) that all 3,475,226 pickup
+timestamps carry zero microseconds, so there's no sub-second
+formatting inconsistency to worry about across rows.
+
+**Lateness columns left NULL by this job.** `window_metrics.
+late_event_count`/`lateness_p50_seconds`/`lateness_p99_seconds`/
+`lateness_max_seconds` are populated by the trigger as NULL for every
+window this job writes - already flagged as a separate, not-yet-built
+step in #41's schema design (computing a true per-window late-arrival
+count needs Flink's side-output/DataStream-level late-data handling,
+not plain SQL), not a new gap introduced here.
+
+**Scope match against #41: no metric added or dropped.** The wide
+table's column list is exactly #41's metric list - this entry is
+about the mechanism that gets that list into the narrow schema, not a
+revision of what the list contains.
+
+## 43. Flink's JDBC connector jars target Flink 2.0.0, not this
+project's 2.1.0 - stated explicitly, not left implicit
+
+Added to `docker/flink/Dockerfile` for #42's mechanism (a JDBC sink
+into `weir_metrics.window_metrics_wide`), approved before being added
+per CLAUDE.md hard rule 6.
+
+**Two jars needed, not one - checked, not assumed.** Kafka's connector
+is a single self-contained uber jar
+(`flink-sql-connector-kafka`, bundling its own transitive deps -
+already in this Dockerfile). Searched Maven Central's own search API
+for a `flink-sql-connector-jdbc*` equivalent - none exists for any
+version. Flink 4.x's JDBC connector is split into a thin core jar
+(`flink-connector-jdbc-core`, the generic `JdbcDynamicTableFactory`)
+plus a separate per-database dialect jar
+(`flink-connector-jdbc-postgres`), neither of which bundles the
+other or the driver - the driver jar this Dockerfile already had
+(`postgresql-42.7.13.jar`) turns out to have been necessary but not
+sufficient; both new jars are needed alongside it.
+
+**Version caveat, stated explicitly rather than left implicit.**
+`org.apache.flink:flink-connector-jdbc-core`/`-postgres` exist on
+Maven Central at exactly three versions total (confirmed via Maven
+Central's search API, not browsed-and-guessed): `3.3.0-1.19`,
+`3.3.0-1.20`, `4.0.0-2.0`. The `-2.0` suffix reads as "built for
+Flink 2.0.x" by the same convention this Dockerfile's Kafka connector
+already uses (`4.0.1-2.0`) - confirmed for certain by fetching the
+actual `pom.xml` at both the `v4.0.0` git tag AND the newer `v4.1.0`
+tag (not yet published to Maven Central under this artifact) from
+`apache/flink-connector-jdbc`: both declare
+`<flink.version>2.0.0</flink.version>` verbatim. This image runs
+Flink **2.1.0** (`docker/flink/Dockerfile`'s own `FROM` line) - `4.0.0-2.0`
+is the only JDBC connector build that exists at all, and it was built
+and tested against 2.0.0, not 2.1.0. Same-minor-line (2.x)
+compatibility is a reasonable bet - Flink's own connector API doesn't
+typically break within a major version - but it is a bet, not a
+confirmed match, and this entry exists so that bet is on the record
+rather than silently assumed. If a JDBC-specific incompatibility ever
+surfaces, this is the first place to look.
+
+**Verification, not just a successful build.** Per E7 (a bind mount
+has silently discarded image defaults twice already), jar presence
+was checked inside the actual container as `docker compose` runs it -
+mounts and all - not just confirmed as present in a bare `docker
+build` layer. See the same commit's CI run for the real output of
+`docker compose exec flink-jobmanager ls /opt/flink/lib`.
