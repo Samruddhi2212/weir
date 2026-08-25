@@ -104,8 +104,12 @@ jobs:
       - name: Download NYC TLC Yellow Taxi data (2025-01)
         run: python ingestion/replay/download_tlc_data.py --year-month 2025-01 --output-dir data/tlc
       - name: Run the full metrics job verification
+        # `-u`: stdout is a pipe here, not a tty, so CPython fully
+        # block-buffers it by default - a real gap this workflow's
+        # first run actually hit (V2/V3 exist to prevent exactly this:
+        # a failure with no raw output to show why).
         run: |
-          python scripts/verify_metrics_job.py \
+          python -u scripts/verify_metrics_job.py \
             --input data/tlc/yellow_tripdata_2025-01.parquet \
             --bootstrap-server localhost:${KAFKA_EXTERNAL_PORT:-29092}
       - name: Show logs on failure

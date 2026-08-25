@@ -55,9 +55,16 @@ CREATE INDEX IF NOT EXISTS column_metrics_series_lookup
 -- not append-only) - plain, standard TUMBLE/GROUP BY/aggregate-
 -- function SQL, nothing exotic. The AFTER INSERT OR UPDATE trigger
 -- below reshapes each wide row into window_metrics + column_metrics,
--- using Postgres's own well-established UNNEST(ARRAY[...]), not
--- Flink's less-battle-tested equivalent - #42's rejected-alternative
--- reasoning.
+-- using a literal VALUES (...) list, not Flink's less-battle-tested
+-- SQL-side melt equivalent - #42's rejected-alternative reasoning.
+-- (An earlier version of this trigger used UNNEST(ARRAY[ROW(...),
+-- ...]) instead - real Postgres syntax, but it hit a genuine, CI-
+-- caught bug: "function return row and query-specified return row do
+-- not match", from Postgres being unable to reliably infer a single
+-- uniform composite type across many anonymous ROW(...) constructors.
+-- VALUES (...), (...), ... AS m(cols) has no such ambiguity - each
+-- column's type unifies independently down its own column, which is
+-- exactly what a fixed, known-shape literal tuple list needs.)
 CREATE TABLE IF NOT EXISTS weir_metrics.window_metrics_wide (
     window_start TIMESTAMP NOT NULL,
     window_end   TIMESTAMP NOT NULL,
@@ -138,7 +145,7 @@ CREATE TABLE IF NOT EXISTS weir_metrics.window_metrics_wide (
 -- lateness_* columns are left NULL here - DEFENSE.md #42, that needs
 -- Flink's side-output/DataStream-level late-data handling, not plain
 -- SQL, and is a separate, not-yet-built step) plus 69 column_metrics
--- rows via UNNEST(ARRAY[...]). ON CONFLICT DO UPDATE on both target
+-- rows via a literal VALUES (...) list. ON CONFLICT DO UPDATE on both target
 -- tables so re-processing the same window (a job restart replaying
 -- from its last checkpoint, for instance) overwrites rather than
 -- duplicates or errors.
@@ -151,77 +158,77 @@ BEGIN
 
     INSERT INTO weir_metrics.column_metrics (window_start, window_end, column_name, metric_name, metric_value)
     SELECT NEW.window_start, NEW.window_end, m.column_name, m.metric_name, m.metric_value
-    FROM UNNEST(ARRAY[
-        ROW('VendorID', 'null_count', NEW.vendorid_nulls::double precision),
-        ROW('tpep_dropoff_datetime', 'null_count', NEW.tpep_dropoff_datetime_nulls::double precision),
-        ROW('passenger_count', 'null_count', NEW.passenger_count_nulls::double precision),
-        ROW('trip_distance', 'null_count', NEW.trip_distance_nulls::double precision),
-        ROW('RatecodeID', 'null_count', NEW.ratecodeid_nulls::double precision),
-        ROW('store_and_fwd_flag', 'null_count', NEW.store_and_fwd_flag_nulls::double precision),
-        ROW('PULocationID', 'null_count', NEW.pulocationid_nulls::double precision),
-        ROW('DOLocationID', 'null_count', NEW.dolocationid_nulls::double precision),
-        ROW('payment_type', 'null_count', NEW.payment_type_nulls::double precision),
-        ROW('fare_amount', 'null_count', NEW.fare_amount_nulls::double precision),
-        ROW('extra', 'null_count', NEW.extra_nulls::double precision),
-        ROW('mta_tax', 'null_count', NEW.mta_tax_nulls::double precision),
-        ROW('tip_amount', 'null_count', NEW.tip_amount_nulls::double precision),
-        ROW('tolls_amount', 'null_count', NEW.tolls_amount_nulls::double precision),
-        ROW('improvement_surcharge', 'null_count', NEW.improvement_surcharge_nulls::double precision),
-        ROW('total_amount', 'null_count', NEW.total_amount_nulls::double precision),
-        ROW('congestion_surcharge', 'null_count', NEW.congestion_surcharge_nulls::double precision),
-        ROW('Airport_fee', 'null_count', NEW.airport_fee_nulls::double precision),
-        ROW('cbd_congestion_fee', 'null_count', NEW.cbd_congestion_fee_nulls::double precision),
-        ROW('VendorID', 'distinct_count', NEW.vendorid_distinct::double precision),
-        ROW('RatecodeID', 'distinct_count', NEW.ratecodeid_distinct::double precision),
-        ROW('payment_type', 'distinct_count', NEW.payment_type_distinct::double precision),
-        ROW('PULocationID', 'distinct_count', NEW.pulocationid_distinct::double precision),
-        ROW('DOLocationID', 'distinct_count', NEW.dolocationid_distinct::double precision),
-        ROW('store_and_fwd_flag', 'distinct_count', NEW.store_and_fwd_flag_distinct::double precision),
-        ROW('fare_amount', 'negative_count', NEW.fare_amount_negative::double precision),
-        ROW('tip_amount', 'negative_count', NEW.tip_amount_negative::double precision),
-        ROW('tolls_amount', 'negative_count', NEW.tolls_amount_negative::double precision),
-        ROW('total_amount', 'negative_count', NEW.total_amount_negative::double precision),
-        ROW('trip_distance', 'negative_count', NEW.trip_distance_negative::double precision),
-        ROW('passenger_count', 'negative_count', NEW.passenger_count_negative::double precision),
-        ROW('trip_distance', 'min', NEW.trip_distance_min),
-        ROW('trip_distance', 'max', NEW.trip_distance_max),
-        ROW('trip_distance', 'mean', NEW.trip_distance_mean),
-        ROW('fare_amount', 'min', NEW.fare_amount_min),
-        ROW('fare_amount', 'max', NEW.fare_amount_max),
-        ROW('fare_amount', 'mean', NEW.fare_amount_mean),
-        ROW('extra', 'min', NEW.extra_min),
-        ROW('extra', 'max', NEW.extra_max),
-        ROW('extra', 'mean', NEW.extra_mean),
-        ROW('mta_tax', 'min', NEW.mta_tax_min),
-        ROW('mta_tax', 'max', NEW.mta_tax_max),
-        ROW('mta_tax', 'mean', NEW.mta_tax_mean),
-        ROW('tip_amount', 'min', NEW.tip_amount_min),
-        ROW('tip_amount', 'max', NEW.tip_amount_max),
-        ROW('tip_amount', 'mean', NEW.tip_amount_mean),
-        ROW('tolls_amount', 'min', NEW.tolls_amount_min),
-        ROW('tolls_amount', 'max', NEW.tolls_amount_max),
-        ROW('tolls_amount', 'mean', NEW.tolls_amount_mean),
-        ROW('improvement_surcharge', 'min', NEW.improvement_surcharge_min),
-        ROW('improvement_surcharge', 'max', NEW.improvement_surcharge_max),
-        ROW('improvement_surcharge', 'mean', NEW.improvement_surcharge_mean),
-        ROW('total_amount', 'min', NEW.total_amount_min),
-        ROW('total_amount', 'max', NEW.total_amount_max),
-        ROW('total_amount', 'mean', NEW.total_amount_mean),
-        ROW('congestion_surcharge', 'min', NEW.congestion_surcharge_min),
-        ROW('congestion_surcharge', 'max', NEW.congestion_surcharge_max),
-        ROW('congestion_surcharge', 'mean', NEW.congestion_surcharge_mean),
-        ROW('Airport_fee', 'min', NEW.airport_fee_min),
-        ROW('Airport_fee', 'max', NEW.airport_fee_max),
-        ROW('Airport_fee', 'mean', NEW.airport_fee_mean),
-        ROW('cbd_congestion_fee', 'min', NEW.cbd_congestion_fee_min),
-        ROW('cbd_congestion_fee', 'max', NEW.cbd_congestion_fee_max),
-        ROW('cbd_congestion_fee', 'mean', NEW.cbd_congestion_fee_mean),
-        ROW('passenger_count', 'min', NEW.passenger_count_min),
-        ROW('passenger_count', 'max', NEW.passenger_count_max),
-        ROW('passenger_count', 'mean', NEW.passenger_count_mean),
-        ROW('trip_duration', 'negative_count', NEW.trip_duration_negative_count::double precision),
-        ROW('trip_duration', 'zero_count', NEW.trip_duration_zero_count::double precision)
-    ]) AS m(column_name text, metric_name text, metric_value double precision)
+    FROM (VALUES
+        ('VendorID', 'null_count', NEW.vendorid_nulls::double precision),
+        ('tpep_dropoff_datetime', 'null_count', NEW.tpep_dropoff_datetime_nulls::double precision),
+        ('passenger_count', 'null_count', NEW.passenger_count_nulls::double precision),
+        ('trip_distance', 'null_count', NEW.trip_distance_nulls::double precision),
+        ('RatecodeID', 'null_count', NEW.ratecodeid_nulls::double precision),
+        ('store_and_fwd_flag', 'null_count', NEW.store_and_fwd_flag_nulls::double precision),
+        ('PULocationID', 'null_count', NEW.pulocationid_nulls::double precision),
+        ('DOLocationID', 'null_count', NEW.dolocationid_nulls::double precision),
+        ('payment_type', 'null_count', NEW.payment_type_nulls::double precision),
+        ('fare_amount', 'null_count', NEW.fare_amount_nulls::double precision),
+        ('extra', 'null_count', NEW.extra_nulls::double precision),
+        ('mta_tax', 'null_count', NEW.mta_tax_nulls::double precision),
+        ('tip_amount', 'null_count', NEW.tip_amount_nulls::double precision),
+        ('tolls_amount', 'null_count', NEW.tolls_amount_nulls::double precision),
+        ('improvement_surcharge', 'null_count', NEW.improvement_surcharge_nulls::double precision),
+        ('total_amount', 'null_count', NEW.total_amount_nulls::double precision),
+        ('congestion_surcharge', 'null_count', NEW.congestion_surcharge_nulls::double precision),
+        ('Airport_fee', 'null_count', NEW.airport_fee_nulls::double precision),
+        ('cbd_congestion_fee', 'null_count', NEW.cbd_congestion_fee_nulls::double precision),
+        ('VendorID', 'distinct_count', NEW.vendorid_distinct::double precision),
+        ('RatecodeID', 'distinct_count', NEW.ratecodeid_distinct::double precision),
+        ('payment_type', 'distinct_count', NEW.payment_type_distinct::double precision),
+        ('PULocationID', 'distinct_count', NEW.pulocationid_distinct::double precision),
+        ('DOLocationID', 'distinct_count', NEW.dolocationid_distinct::double precision),
+        ('store_and_fwd_flag', 'distinct_count', NEW.store_and_fwd_flag_distinct::double precision),
+        ('fare_amount', 'negative_count', NEW.fare_amount_negative::double precision),
+        ('tip_amount', 'negative_count', NEW.tip_amount_negative::double precision),
+        ('tolls_amount', 'negative_count', NEW.tolls_amount_negative::double precision),
+        ('total_amount', 'negative_count', NEW.total_amount_negative::double precision),
+        ('trip_distance', 'negative_count', NEW.trip_distance_negative::double precision),
+        ('passenger_count', 'negative_count', NEW.passenger_count_negative::double precision),
+        ('trip_distance', 'min', NEW.trip_distance_min),
+        ('trip_distance', 'max', NEW.trip_distance_max),
+        ('trip_distance', 'mean', NEW.trip_distance_mean),
+        ('fare_amount', 'min', NEW.fare_amount_min),
+        ('fare_amount', 'max', NEW.fare_amount_max),
+        ('fare_amount', 'mean', NEW.fare_amount_mean),
+        ('extra', 'min', NEW.extra_min),
+        ('extra', 'max', NEW.extra_max),
+        ('extra', 'mean', NEW.extra_mean),
+        ('mta_tax', 'min', NEW.mta_tax_min),
+        ('mta_tax', 'max', NEW.mta_tax_max),
+        ('mta_tax', 'mean', NEW.mta_tax_mean),
+        ('tip_amount', 'min', NEW.tip_amount_min),
+        ('tip_amount', 'max', NEW.tip_amount_max),
+        ('tip_amount', 'mean', NEW.tip_amount_mean),
+        ('tolls_amount', 'min', NEW.tolls_amount_min),
+        ('tolls_amount', 'max', NEW.tolls_amount_max),
+        ('tolls_amount', 'mean', NEW.tolls_amount_mean),
+        ('improvement_surcharge', 'min', NEW.improvement_surcharge_min),
+        ('improvement_surcharge', 'max', NEW.improvement_surcharge_max),
+        ('improvement_surcharge', 'mean', NEW.improvement_surcharge_mean),
+        ('total_amount', 'min', NEW.total_amount_min),
+        ('total_amount', 'max', NEW.total_amount_max),
+        ('total_amount', 'mean', NEW.total_amount_mean),
+        ('congestion_surcharge', 'min', NEW.congestion_surcharge_min),
+        ('congestion_surcharge', 'max', NEW.congestion_surcharge_max),
+        ('congestion_surcharge', 'mean', NEW.congestion_surcharge_mean),
+        ('Airport_fee', 'min', NEW.airport_fee_min),
+        ('Airport_fee', 'max', NEW.airport_fee_max),
+        ('Airport_fee', 'mean', NEW.airport_fee_mean),
+        ('cbd_congestion_fee', 'min', NEW.cbd_congestion_fee_min),
+        ('cbd_congestion_fee', 'max', NEW.cbd_congestion_fee_max),
+        ('cbd_congestion_fee', 'mean', NEW.cbd_congestion_fee_mean),
+        ('passenger_count', 'min', NEW.passenger_count_min),
+        ('passenger_count', 'max', NEW.passenger_count_max),
+        ('passenger_count', 'mean', NEW.passenger_count_mean),
+        ('trip_duration', 'negative_count', NEW.trip_duration_negative_count::double precision),
+        ('trip_duration', 'zero_count', NEW.trip_duration_zero_count::double precision)
+    ) AS m(column_name, metric_name, metric_value)
     ON CONFLICT (window_start, window_end, column_name, metric_name) DO UPDATE SET metric_value = EXCLUDED.metric_value;
 
     RETURN NEW;
