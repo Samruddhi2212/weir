@@ -206,6 +206,13 @@ def main():
         ("volume", ws, we, 0, 15, "scored", 100.0, 90.0, 5.0, 2.0),
     )
 
+    expect_success(
+        conn, "scored_windows accepts 'dst_ambiguous_excluded' (DEFENSE.md #44/#45's fourth status)",
+        insert_scored_windows_sql(),
+        ("volume", ws + datetime.timedelta(hours=1), we + datetime.timedelta(hours=1),
+         6, 1, "dst_ambiguous_excluded", 100.0, None, None, None),
+    )
+
     print("\n=== Stage 3: first-window bootstrap - no NULL-handling branch needed ===")
     with conn.cursor() as cur:
         cur.execute(

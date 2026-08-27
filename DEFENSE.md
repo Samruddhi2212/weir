@@ -2833,3 +2833,18 @@ before either reached actual detector code:**
   `expect_check_violation()` now takes an `expected_constraint`
   argument and fails if the wrong one fires - so a test that passes
   for the wrong reason can't happen silently a second time.
+
+**A third bug, caught writing `adapter.py`: the DST fall-back's
+ambiguous hour (DEFENSE.md #44/#45) had a documented exclusion policy
+but no actual status to record it under.** `scored_windows.status`
+only had three values, none of which fit "this window was seen but
+deliberately excluded because its true UTC offset can't be
+recovered" - it would have had to be misreported as some other status
+or silently skipped outright, either of which is exactly the kind of
+unaccounted-for record V8 exists to catch. Added a fourth status,
+`'dst_ambiguous_excluded'`, checked in `adapter.process_window`
+*before* the frontier lock is even taken (this exclusion doesn't
+depend on arrival order, so it doesn't need the same serialization
+the frontier check does) - real, if rare: `1/(7*24*60) ~= 0.01%` of
+all windows this detector will ever see fall in this one hour per
+year.
