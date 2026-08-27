@@ -41,6 +41,17 @@ section specifically.
   ever. Enforced by `scripts/check_pinned_images.sh`.
 - **C5** — CI runs every test in `tests/`. Untested code is not done.
 
+## CI
+
+Two tiers: what runs automatically on push/PR, and five
+`workflow_dispatch`-only verification workflows that don't. See
+[docs/CI.md](docs/CI.md) for the full list and why each one is manual.
+
+- **C6** — A `workflow_dispatch`-only verification covering a branch's
+  changes must be dispatched and green before that branch merges to
+  main. The workflow existing, or a stale green run against older code,
+  does not satisfy C5 for this tier.
+
 ## Hard rules
 
 1. NEVER invent, estimate, or placeholder a metric value. Detection rates,
