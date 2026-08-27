@@ -112,8 +112,13 @@ CREATE TABLE IF NOT EXISTS weir_incidents.scored_windows (
     --   never updated until it was already warm could never become
     --   warm in the first place).
     -- 'skipped_late': arrived behind detector_progress's frontier -
-    --   the ONE status that does NOT update baseline_state at all -
-    --   counted per V8, not dropped.
+    --   does NOT update baseline_state - counted per V8, not dropped.
+    -- 'dst_ambiguous_excluded': window_end falls in a DST fall-back's
+    --   ambiguous local hour (DEFENSE.md #44/#45) - the true UTC
+    --   offset can't be recovered from a naive local timestamp, so
+    --   this window is excluded from baseline_state (same policy as
+    --   ingestion/replay/load_pickup_timestamps.py, applied a second
+    --   time here) - counted per V8, not silently skipped.
     status                  TEXT NOT NULL,
     observed_value          DOUBLE PRECISION NOT NULL,
     baseline_mean_at_time   DOUBLE PRECISION,
@@ -122,7 +127,7 @@ CREATE TABLE IF NOT EXISTS weir_incidents.scored_windows (
     scored_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (detector_name, window_start, window_end),
     CONSTRAINT scored_windows_status_valid
-        CHECK (status IN ('scored', 'insufficient_baseline', 'skipped_late')),
+        CHECK (status IN ('scored', 'insufficient_baseline', 'skipped_late', 'dst_ambiguous_excluded')),
     CONSTRAINT scored_windows_weekday_range CHECK (bucket_weekday BETWEEN 0 AND 6),
     CONSTRAINT scored_windows_hour_range CHECK (bucket_hour BETWEEN 0 AND 23),
     -- Biconditional, not one-directional: status='scored' REQUIRES all
