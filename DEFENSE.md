@@ -2848,3 +2848,86 @@ depend on arrival order, so it doesn't need the same serialization
 the frontier check does) - real, if rare: `1/(7*24*60) ~= 0.01%` of
 all windows this detector will ever see fall in this one hour per
 year.
+
+## 46. Part 4.2: `reliability/volume/run.py` - the read cycle, and where the naive-local-time boundary actually gets crossed
+
+Written before `run.py`'s code, per D1.
+
+**Confirmed, not assumed: `weir_metrics.window_metrics.window_start`/
+`.window_end` are naive America/New_York civil time, not UTC.**
+Checked directly against `ingestion/replay/load_pickup_timestamps.py`
+and `ingestion/replay/replay_producer.py` - neither performs any
+UTC conversion anywhere; NYC TLC's own `tpep_pickup_datetime` is
+recorded in local wall-clock time by the source data and flows through
+Kafka and `metrics_job.sql`'s `TUMBLE` unmodified. This matters because
+`adapter.py`'s `process_window`/`to_local_bucket`/`is_dst_ambiguous`
+all require a genuinely UTC-aware `window_end` (DEFENSE.md #45) -
+`run.py` is the one place in this detector that performs the
+naive-local -> aware-UTC conversion #45 point 5 already named but
+didn't itself implement. Getting the direction of this conversion
+backwards (treating the naive value as if it were already UTC) would
+silently shift every bucket by the local UTC offset (4 or 5 hours)
+without raising anything - exactly the kind of off-by-one #45's own
+range CHECKs exist to catch at the *schema* level, but a wrong offset
+that still lands in 0-23 wouldn't trip a CHECK at all, only a
+comparison against real seasonality would ever surface it, and only
+by accident.
+
+**Mechanism: `naive_local.replace(tzinfo=ZoneInfo(timezone_name))`,
+then `.astimezone(datetime.timezone.utc)` - not `.astimezone()`
+alone.** `replace()` attaches a zone to the naive value without
+shifting the clock reading (correct: the naive value already *is*
+America/New_York wall-clock time); `astimezone()` alone on a naive
+value would instead assume the *system* zone, making the result
+depend on whatever machine happens to run this script. For the DST
+fall-back's ambiguous hour, `replace()` + `astimezone()` still
+produces *some* well-defined UTC instant (Python's default `fold=0`:
+the earlier of the two valid offsets, i.e. still-EDT) even though
+neither offset is verifiably the real one. Deliberately not resolved
+more carefully here: `adapter.is_dst_ambiguous` re-derives the
+NY-local naive value from whatever UTC instant it's handed and checks
+it against the exact same `DST_FALLBACK_AMBIGUOUS_HOURS` table, so the
+window is caught and excluded regardless of which of the two folds
+this conversion happened to pick - the correctness of the exclusion
+doesn't depend on `run.py` picking the "right" fold, only on the
+round trip landing back in the same one-hour range, which it always
+does for either fold.
+
+**Alternative considered and rejected: push the conversion into the
+SQL query itself** (`window_end AT TIME ZONE 'America/New_York' AT
+TIME ZONE 'UTC'`), letting Postgres do it instead of Python. Rejected
+because it would duplicate the same timezone semantics in two
+different languages/libraries (Postgres's `AT TIME ZONE` vs Python's
+`zoneinfo`) for no benefit at this detector's 1-window-per-minute
+cadence (DEFENSE.md #45's own reasoning for why a network round trip
+here is irrelevant) - one reviewable place for this logic
+(`adapter.py`'s pure helpers, now joined by `run.py`'s
+`to_utc_instant`) is worth more than a marginal query-side
+optimization, especially given how easy this exact boundary is to get
+backwards (previous paragraph).
+
+**Read cycle: implements #45 point 2's already-specified design, not
+a new one.** `detector_progress.last_processed_window_end` (a true
+UTC `TIMESTAMPTZ`) is converted to NY-local-naive terms *once* per
+run, then used directly against `window_metrics.window_end` (also
+naive, also NY-local) as a same-type, same-semantics SQL comparison -
+deliberately not a cross-timezone comparison in SQL, consistent with
+the previous paragraph's decision to keep all timezone logic in
+Python. Of the rows returned, `max_window_end_seen` is computed
+(still in naive-local terms - a fixed-duration subtraction for the lag
+buffer is insensitive to which naive representation it's done in,
+except within the one DST hour this detector already excludes
+separately), and only rows with `window_end <= max_window_end_seen -
+max_lag_seconds` are processed, strictly ascending. This query-level
+filter is a pure efficiency measure, not the correctness mechanism -
+correctness is `process_window`'s own transactional frontier check
+plus `scored_windows`' UNIQUE constraint (#45); a coarse or even
+slightly-wrong filter here just means a row gets picked up on a later
+run instead of this one, never processed incorrectly or twice.
+
+**Not a daemon.** `run.py` is a single pass: process everything
+currently eligible, then exit. Scheduling it repeatedly (cron, a
+systemd timer, a long-running loop) is a deployment concern, deferred
+along with the rest of Sprint 1's deployment scope - there's no
+deployment target yet to schedule it against (docs/FUTURE_WORK.md).
+
