@@ -32,6 +32,7 @@ default; they exist, but only execute when someone dispatches them.
 | `metrics-job-verify.yml` | The Flink metrics job (Kafka -> windowed aggregation -> Postgres, Part 3.1) against real data | Needs Kafka+Postgres+Flink; rebuilding the Flink image and running it is too slow for ci.yml |
 | `replay-verify.yml` | `replay_producer.py` - timestamps, compression ratio, resume seam | Downloads a real ~59MB dataset and does three Kafka round trips; V4 wants this dispatched 5x, not trusted on one pass |
 | `exactly-once.yml` | Kafka -> Flink -> Iceberg exactly-once delivery + TaskManager recovery | `verify_recovery.sh` SIGKILLs a running container - destructive, has no place in a gate that runs on every push |
+| `volume-detector-verify.yml` | The volume detector's real-data accounting (Part 4.2/4.3) - every real window accounted for, the real DST fall-back hour excluded, zero false `scored` rows | Needs the full Kafka/Postgres/Flink stack plus a real ~59MB month download (reuses `verify_metrics_job.py`'s own population step, DEFENSE.md #48) - same cost profile as `metrics-job-verify.yml`, same reason it's manual |
 
 ## Merge rule
 

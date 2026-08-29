@@ -74,6 +74,17 @@ directories or files exist for these.
   are cheap; alpha sweeps aren't — a real, stated limitation of this
   design, not an oversight.
 
+- **Whether the volume detector flags a real incident against real,
+  fully-warmed data is unverified.** `scripts/verify_volume_detector.py`
+  (DEFENSE.md #48) checks the detector's accounting/plumbing against one
+  real month of TLC data (2024-11, chosen for its real DST fall-back) -
+  every window accounted for, the DST-ambiguous hour correctly excluded,
+  zero false `scored` rows - but one month can't warm any bucket's
+  8-week baseline (DEFENSE.md #44), so it structurally cannot exercise
+  real incident detection. That's `benchmarks/`'s job, once built - full
+  multi-month real data against the reproducible failure catalog, not
+  this integration check's.
+
 - **`replay_producer.py`/`metrics_job.sql` don't exclude the DST
   fall-back's ambiguous hour (Nov 3 2024, 01:00–01:59 local) the way
   `load_pickup_timestamps.py` does** (DEFENSE.md #44/#45) — so
