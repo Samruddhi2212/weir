@@ -1,0 +1,6 @@
+# psycopg v3 (not psycopg2 - actively maintained, better typing), pinned
+# to 3.3.4, the latest stable release confirmed via PyPI's own JSON API
+# at the time of this decision (not assumed). [binary] pulls prebuilt
+# wheels rather than requiring libpq-dev/a C compiler on every machine
+# this runs on. Approved per CLAUDE.md hard rule 6 - see DEFENSE.md #45.
+psycopg[binary]==3.3.4

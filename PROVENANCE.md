@@ -58,8 +58,24 @@
 ## Read as reference, written independently
 
 - StatefulDedupJob.java — stateful pattern reference
-- ewma_ad.py — EWMA algorithm reference; Weir's implementation written from
-  the statistical definition, not adapted
+
+## Studied, not copied
+
+- `pyflink_jobs/src/jobs/ewma_ad.py` — read in full for
+  `reliability/volume/`, Weir's volume detector - the core of this
+  project's differentiator, and deliberately written from the
+  statistical definition, not adapted, given that. The reference job's
+  actual algorithm: a single continuously-updating EWMA mean and
+  EWMA-variance per key (`device_id`), no time-of-day/day-of-week
+  structure, `|x - EWMA| > K*sqrt(Var)` with `K=3.0`. Weir's detector
+  diverges in three deliberate ways - bucketed by (weekday, hour), a
+  median/MAD-based robust (Iglewicz-Hoaglin) modified z-score instead
+  of a variance-based one, and an explicit warmup state distinct from
+  a scored one - each with its own real reason, not a stylistic
+  rewrite of the same algorithm. Full design reasoning, including why
+  each divergence was needed for this project's actual data (seasonal
+  taxi ridership, a baseline that will contain real holidays), is
+  DEFENSE.md #44, written before any of `reliability/volume/`'s code.
 
 ## Design references (read, not copied)
 
