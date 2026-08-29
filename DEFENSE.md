@@ -2225,6 +2225,25 @@ checkpoint count was not, on its own, enough to conclude the job was
 producing correct output - it only proves the job is alive, not that
 data is flowing through to the sink.
 
+**Constraint on any future change to this job: the fix is idleness
+detection, not parallelism pinned to 1, and not a partition-count
+change.** Two other "fixes" would have made this specific CI run pass
+just as well: setting this job's parallelism to 1 (matching the test
+topic's single partition), or giving the test topic more partitions.
+Neither was chosen, and neither is an acceptable substitute for
+`table.exec.source.idle-timeout` going forward - both only remove the
+*symptom* for this one topic's current shape, and would silently
+reintroduce the exact same bug the moment a real deployment's Kafka
+topic has more partitions than this job's parallelism, or an uneven
+partition-to-subtask assignment (both routine in production Kafka,
+not edge cases). `table.exec.source.idle-timeout` is the only one of
+the three that stays correct regardless of how partitions and
+parallelism relate to each other. Any future change to this job's
+parallelism, or to the source topic's partition count, must keep this
+setting - removing it would not fail loudly, it would silently
+reintroduce this exact bug (every window blocked forever) with no
+error in the logs, exactly as it did before this was diagnosed.
+
 **Found next via CI: the UNNEST(ARRAY[ROW(...), ...]) mechanism this
 entry originally chose was itself wrong.** With the idle-timeout fix
 in place, the job ran, checkpointed, and the wide row landed in
@@ -2246,6 +2265,21 @@ each column's type unifies independently down its own column instead
 of needing one shared row type across all 69 entries, which is
 exactly what a fixed, known-shape tuple list needs and has no
 equivalent ambiguity.
+
+**Verified 5/5, not trusted on one pass.** All four bugs above were
+found and fixed across several individually-failing CI runs; once the
+trigger fix landed, `.github/workflows/metrics-job-verify.yml` was run
+5 consecutive times (run IDs 32844933111, 32845312440, 32845730285,
+32846100518, 32846483857) - 5/5 green, each one independently
+rebuilding the Flink image from scratch, replaying real TLC data, and
+running both the deep check (all 69 `column_metrics` values plus
+`window_metrics.row_count` for one specific window, exact match
+against ground truth computed independently from the source parquet)
+and the broad check (`SUM(row_count)` across every closed window
+exactly matching an independently-computed expected count from the
+emission log). Neither check has ever passed on a fluke - every
+value compared is either an exact integer/float match or the run
+fails loudly.
 
 ## 43. Flink's JDBC connector jars target Flink 2.0.0, not this
 project's 2.1.0 - stated explicitly, not left implicit
@@ -2293,3 +2327,897 @@ was checked inside the actual container as `docker compose` runs it -
 mounts and all - not just confirmed as present in a bare `docker
 build` layer. See the same commit's CI run for the real output of
 `docker compose exec flink-jobmanager ls /opt/flink/lib`.
+
+## 44. The volume detector's design, before any detector code
+
+Written before `reliability/volume/`'s implementation, per D1. Studied
+(not copied) `reference/streaming-lakehouse-lab/pyflink_jobs/src/jobs/
+ewma_ad.py` first - PROVENANCE.md's "Studied, not copied" section
+records that read. That job's actual algorithm: a single continuously-
+updating EWMA mean and EWMA-variance per key (device_id), no
+time-of-day/day-of-week structure at all, anomaly flagged at
+`|x - EWMA| > K * sqrt(Var)`, K=3.0. Weir's volume detector diverges
+from it in three real ways, each with a reason:
+
+**1. Bucketed by (weekday, hour-of-day), not one global running
+baseline.** A single EWMA over `window_metrics.row_count` would treat
+every rush-hour burst and overnight lull as deviation from "normal,"
+constantly firing on ordinary daily/weekly seasonality already
+documented in this project's own data findings (#38, #41). Rejected
+alternatives, both real and considered: (a) STL/seasonal decomposition
+- explicitly separates trend from seasonality, but is a batch fit
+requiring periodic re-fitting over a full history window, not a
+natural per-window streaming update; wrong shape for a job that
+processes one window at a time. (b) A flat rolling average over the
+last N same-bucket occurrences - simpler to explain, but needs to
+store N raw historical values per bucket instead of one compact
+running statistic, and weights an 8-week-old occurrence the same as
+last week's, reacting slower to genuine regime shifts.
+
+**2. Bucket granularity is (weekday, HOUR), not (weekday, hour,
+minute).** A (weekday, hour, minute) bucket only recurs once every 7
+days - at most 4-5 occurrences in this project's entire dataset,
+nowhere near enough to build any baseline, in this project's lifetime
+or a real deployment's early months. (weekday, hour) gives ~60
+observations/week/bucket (one per 1-minute window within that hour),
+and - because every weekday-hour combination recurs exactly once every
+7 days - all 168 buckets warm up in lockstep with calendar time, not on
+a staggered per-bucket schedule.
+
+**3. Modified (robust) z-score, not the reference's variance-based
+one - and the exact Iglewicz-Hoaglin formula, not an invented one.**
+`z = 0.6745 * (x - ewma_median) / scale`, flagged at `|z| > 3.5`
+(Iglewicz, B. and Hoaglin, D.C. (1993), "How to Detect and Handle
+Outliers", ASQC Quality Press - the standard modified-z-score
+convention; 0.6745 and 3.5 are its established constants, not
+independently chosen). A MAD-based scale is far less sensitive to a
+single unusual historical week than the reference's variance-based
+one, which is what this project needs given the baseline itself will
+contain real seasonal spikes and holidays (below) that a variance
+estimate would let distort the threshold for a long time afterward.
+
+**Warmup: `min_baseline_weeks = 8` (-> `min_observations = 480`,
+derived, not a separate magic number), and honest about what that
+buys.** Below threshold, the detector emits a distinct
+`status = "insufficient_baseline"` record - `score = None`, no
+incident ever written - not a suppressed score or a score of 0. The
+real sample size that matters for MAD stability is *distinct weekly
+occurrences* (8), not raw per-window updates (480, autocorrelated
+within each hour) - and 8 is genuinely on the low side of robust-stats
+guidance, which generally wants n>=20-30 for a well-behaved MAD. This
+is stated as a floor against the worst cold-start noise, not a claim
+of full maturity at exactly 8 weeks. Consequence, stated explicitly
+rather than left implicit: **this project's measured false-positive
+rate for the volume detector should be read as an upper bound, not a
+settled number** - a longer baseline than this dataset's available
+history would likely lower it further, and CLAUDE.md hard rule 1 (no
+fabricated/inflated-precision metrics) applies as much to *how a real
+number is characterized* as to whether it's real at all.
+
+**MAD = 0 floor: Poisson-justified, not an arbitrary constant.**
+`scale = max(mad, sqrt(ewma_mean), 1.0)`. Row count is a count of
+arrivals; under a simple homogeneous-arrivals assumption, variance ~=
+mean, so `sqrt(mean)` is a principled lower bound on plausible noise
+for a bucket of that magnitude - self-scaling (a quiet overnight
+bucket gets a small floor, rush hour a larger one), with an absolute
+floor of `1.0` underneath for the zero-mean edge case, since row
+counts are integers and a sub-1 difference is meaningless. Unit-tested
+explicitly against identical historical values (MAD would otherwise be
+exactly 0).
+
+**DST: drop the ambiguous hour, don't guess at UTC normalization.**
+Confirmed empirically, not assumed, that `tpep_pickup_datetime` is
+naive local (America/New_York) civil time: Nov 3 2024's hour=1 had
+9,869 trips against 5,606 on the equivalent Saturday (Nov 2) - a ~76%
+jump isolated to exactly the fall-back hour, consistent with that
+wall-clock hour occurring twice that night; UTC storage would show no
+such anomaly. A pure fall-back (which Nov 3 2024 is) doubles one
+bucket's data for that week; it does not zero one out - that's
+spring-forward's effect, not present in the Oct 2024-Jan 2025 window.
+"Normalize to UTC" was considered and rejected: doing so would require
+disambiguating which of the two "1:00-1:59am" batches is pre- or
+post-transition, which is NOT recoverable from a naive timestamp alone
+without an unverifiable assumption - exactly the kind of fabricated
+certainty this project's discipline forbids. Dropping the ambiguous
+hour (Nov 3 2024, 01:00:00-01:59:59 local, that week only) from both
+warmup counting and scoring is a small, explicit, honest exclusion
+instead.
+
+**Holidays: stay in the baseline, on purpose.** Thanksgiving,
+Christmas, and New Year's fall inside the Oct 2024-Jan 2025 window and
+are genuinely anomalous ridership. Excluding them would be curating
+the baseline to avoid an inconvenient result - the same shape of
+problem hard rule 3 forbids for benchmark scenarios ("never tune a
+detector to pass a benchmark scenario... if it misses, it misses").
+Real production baselines contain real holidays; a detector that's
+never seen one in its baseline isn't more correct, just untested
+against a real, recurring case. Consequence, stated explicitly: the
+clean (no injected failure) replay may report real false positives on
+these specific days, and that gets reported as a real, disclosed
+number - not suppressed, not excluded after the fact to make the
+published rate look better.
+
+**Multi-month loader reads only `tpep_pickup_datetime`, not full
+rows - and that's what makes the schema mismatch a non-issue.**
+Confirmed (not assumed) that Oct/Nov/Dec 2024's TLC files have 19
+columns, missing `cbd_congestion_fee` entirely (Jan 2025 has 20) -
+NYC's Manhattan congestion pricing fee started January 2025, so this
+is real and expected, not a data error. The volume detector needs
+nothing but pickup timestamps to compute per-window row counts, so the
+loader built for it (`ingestion/replay/load_pickup_timestamps.py`)
+projects only that one column, which is schema-identical across all
+four months - sidestepping the mismatch entirely rather than needing
+to reconcile it (e.g. via a null-filled column). This loader is for
+ground-truth/baseline construction only (V7 - independent of the
+system under test); the production detector reads its baseline from
+`weir_metrics` in Postgres, never from raw parquet.
+
+**Data range: Oct 2024-Jan 2025 (~17.4 weeks), not the existing single
+month.** One month (~4.3 weeks) is under the 8-week warmup threshold -
+confirmed insufficient before writing any detector code, per this
+project's own instruction to fix data sufficiency first rather than
+shrink the threshold to fit what happened to already be downloaded.
+~17.4 weeks gives 8 for warmup and ~9 remaining where the integration
+test can demonstrate real scoring against a matured baseline, not a
+detector that barely crosses the warmup line at the last window in the
+dataset.
+
+**Addendum, found building the loader: 10 rows across these four
+files have clock-error pickup timestamps years off (2002, 2008,
+2009) or into March 2025 - not legitimate month-boundary spillover.**
+Confirmed via an independent pyarrow.compute filter in
+`tests/integration/test_load_pickup_timestamps.py`, not eyeballed.
+`load_pickup_timestamps.py` drops anything outside each requested
+month's own span +/-7 days (generous relative to the ~22-row spillover
+`#41` already found for a single month; nowhere near enough to admit
+a timestamp that's years off) and reports the exact count and values
+dropped - not silently. First version of the verifying test asserted
+"9" from a manual check that used a looser bound (through Feb 15)
+than the loader's actual margin_days=7 policy (through Feb 8); the
+test's own independent check caught the mismatch and the expectation
+was corrected to the real, verified number (10) - the test doing
+exactly the job V7/V8 exist for.
+
+**Consequence for the published false-positive rate: read it as an
+upper bound, not a settled number.** With `min_baseline_weeks = 8`,
+the MAD's effective independent sample size (8 distinct weekly
+occurrences per bucket) is below the n>=20-30 robust-stats guidance
+generally wants for a stable estimate - stated earlier in this entry,
+repeated here because it has a direct, honest consequence for any
+number this detector eventually publishes. A noisier-than-ideal MAD
+means more scored windows land near the flagging threshold by chance,
+which pushes a measured false-positive rate up, not down - so
+whatever number the benchmark eventually reports for this detector is
+more likely to overstate the true rate than understate it. A longer
+baseline than this dataset's ~17 weeks would likely lower it further.
+This same caveat is stated in README.md, next to where that number
+will eventually appear, not buried here alone - an honest upper bound
+is more credible than a clean number with no stated uncertainty.
+
+## 45. The volume detector runs as its own process, state in Postgres
+- not Flink keyed state, and why that's not just safer but necessary
+
+Written before `reliability/volume/`'s schema or code, per D1.
+
+**Decision: a separate Python process, not part of `metrics_job.sql`.
+State (the warmed EWMA/MAD baseline) lives in Postgres, not Flink
+keyed state.** Real alternative, stated before being rejected: Flink
+keyed state is faster (no network round-trip per update) and is
+exactly what the reference `ewma_ad.py` already does, just re-keyed by
+(weekday, hour) instead of `device_id`. Rejected because:
+
+- It dies with anything beyond a checkpoint-recoverable TaskManager
+  failure - a deliberate redeploy, a savepoint mistake, a state-schema
+  change - and losing it means losing 8+ weeks of accumulated history
+  that Kafka retention almost certainly can't replay from scratch.
+- It's not inspectable without Flink's own state-processor tooling;
+  Postgres state answers "what does this bucket's baseline currently
+  look like" with a plain `SELECT`.
+- Every genuinely novel piece of Flink SQL/connector syntax tried this
+  session has found a real bug on first contact (#33, #42 x2, #43) -
+  putting a stateful anomaly detector's own logic inside another Flink
+  job adds a fifth surface for that same tax, for no compensating
+  benefit at a 1-window-per-minute update cadence where a few ms of
+  Postgres round-trip is irrelevant.
+- **The argument that actually settles it, not just favors it: the
+  sensitivity sweep this project has already committed to (measuring
+  how detection/false-positive rate vary with threshold and other
+  config) needs to re-score the same historical data at many parameter
+  settings.** That's only tractable if the baseline is warmed once and
+  stored, then re-scored cheaply against different thresholds. Flink
+  keyed state would mean a full 8-week rewarm per sweep point - with,
+  say, 20 sweep points, that's 20 full baseline rebuilds instead of
+  one. Postgres state isn't just the safer choice here; it's the only
+  one that makes a deliverable already on this project's roadmap
+  actually tractable.
+
+**Dependency: `psycopg[binary]==3.3.4` (v3, not psycopg2) - approved,
+per hard rule 6.** psycopg2 is in extended maintenance mode; psycopg 3
+is the actively developed line, with better type support and native
+async, and this project's other Python code already targets a modern
+interpreter. `[binary]` pulls prebuilt wheels rather than requiring
+libpq-dev/a C compiler on every machine this runs on (CI runners, this
+project's Windows dev machine) - the tradeoff psycopg's own docs
+describe as convenience-over-leanness, chosen deliberately given this
+project has no existing build-toolchain requirement for Python code
+today. Pinned to 3.3.4, the latest stable release at the time of this
+decision (confirmed via PyPI's own JSON API, not assumed).
+`reliability/volume/requirements.txt` is a new, directory-scoped
+manifest - this project has no root-level Python requirements file yet
+(every other Python dependency so far was installed ad hoc per CI
+step); scoping it to the directory that needs it avoids implying a
+project-wide dependency policy that doesn't exist yet.
+
+**Idempotent scoring: `scored_windows`'s own UNIQUE constraint is the
+correctness backstop; `detector_progress` is the fast resume-point.**
+Every window that gets past `insufficient_baseline` is logged to
+`weir_incidents.scored_windows`, keyed uniquely on `(detector_name,
+window_start, window_end)`. Processing a window is one transaction:
+update `baseline_state`'s EWMA for its bucket, insert the
+`scored_windows` row, insert an `incidents` row if the score crosses
+threshold, and advance `detector_progress.last_processed_window_end` -
+all four writes commit together or none do. A crash mid-transaction
+rolls back cleanly (that window simply gets reprocessed next run,
+exactly once, since nothing partial was ever committed); a restart
+resumes from `detector_progress` (an O(1) lookup, not a scan of
+`scored_windows` for its max) but even if that value were somehow
+wrong, `scored_windows`'s UNIQUE constraint would reject a genuine
+double-processing attempt outright rather than silently double-
+applying a window to the EWMA. Windows must be processed in
+chronological order for the EWMA recursion to mean anything, so one
+global watermark per `detector_name` is sufficient - a bucket's own
+occurrences are a subset of the globally chronological sequence, so
+processing globally in order processes each bucket's occurrences in
+order too.
+
+**Baseline state and scoring results are separable, on purpose - the
+same fact that makes the sweep tractable, reflected in the schema.**
+Three tables, not one: `baseline_state` (the warmed per-bucket EWMA/
+MAD, updated once as live data streams in - the ONLY table a
+sensitivity sweep never touches), `scored_windows` (an append-only log
+of every scored window's inputs - `observed_value`,
+`baseline_mean_at_time`, `baseline_scale_at_time` - decoupled from any
+particular threshold decision, so a sweep recomputes `score`/flag at a
+different threshold straight from these stored numbers, never
+re-reading `weir_metrics` or re-running the EWMA recursion), and
+`incidents` (only the rows that crossed the *currently configured*
+threshold - the smaller, actionable table something like an alerting
+system would consume). If baseline and scoring shared one table and
+lifecycle, a sweep would force a rebuild every time; separating them
+is what makes "warm once, re-score cheaply many times" real rather
+than aspirational.
+
+**Correction, made honestly before it became a false claim in a
+docstring: this is an EWMA-recursive *approximation* of Iglewicz-
+Hoaglin, not a literal implementation of it.** The true modified
+z-score is defined against a sample's actual median and MAD (median
+absolute deviation), computed from a static, sorted collection of
+historical values - not something an O(1)-state exponential recursion
+can produce, since neither median nor MAD is a linear function of its
+inputs the way a mean is. What this detector actually tracks per
+bucket is an exponentially weighted MEAN (`ewma_mean`) and an
+exponentially weighted MEAN ABSOLUTE DEVIATION from that mean
+(`ewma_mad`) - a standard, legitimate robust-ish streaming
+approximation (used under names like "MEWMA" in some statistical-
+process-control literature), but not the same statistic Iglewicz and
+Hoaglin (1993) defined. Caught while designing the schema (deciding
+what `ewma_mad` actually means precisely enough to write a column
+comment), not after shipping a docstring that overclaimed.
+
+**Follow-on correction: Iglewicz-Hoaglin's 0.6745 doesn't transfer to
+a mean-absolute-deviation scale - reusing it anyway would make the
+score tighter than its own label implies.** Confirmed independently
+(not just asserted) that for a normal distribution, MAD (median-
+based) ~= 0.6745*sigma while MeanAD (mean-based) ~= 0.7979*sigma =
+sigma*sqrt(2/pi) - two different constants because MAD and MeanAD are
+different statistics of the same distribution, not interchangeable
+approximations of each other. `0.6745 / 0.7979 ~= 0.8455`, meaning
+reusing 0.6745 as this detector's scale divisor, with `ewma_mad` (a
+MeanAD, not a MAD) as the input, silently produces an *effective*
+threshold around `3.5 * 0.8455 ~= 2.96` sigma-equivalents while the
+code would still read "3.5" - tighter than the label states, which
+means more false positives than the stated threshold implies, not
+fewer.
+
+**Decision: rescale by `1/0.7979 ~= 1.2533` (equivalently
+`sqrt(pi/2)`) - the MeanAD-to-sigma constant, not MAD's - keeping the
+threshold at 3.5.** Real alternative, stated before rejecting it: keep
+0.6745/3.5 as empirically-tuned constants with no sigma-equivalent
+claim at all, and let the sensitivity sweep (DEFENSE.md #44's honest-
+upper-bound framing already anticipates this project publishing a
+false-positive rate against this exact score) find a working threshold
+empirically instead of asserting one. Rejected because this project is
+about to publish a false-positive rate measured against this score -
+an interpretable unit (a real number of sigma-equivalents) is worth
+more here than bit-for-bit continuity with a reference algorithm this
+detector already deliberately diverges from in three other ways (this
+entry, above). The final formula: `z = (x - ewma_mean) /
+max(1.2533 * ewma_mad, sqrt(ewma_mean), 1.0)`, flagged at `|z| > 3.5`
+- the Poisson-noise floor (`sqrt(ewma_mean)`) is applied to the
+already-rescaled, sigma-equivalent quantity, not to raw `ewma_mad`,
+so the floor and the scale live in the same units throughout.
+
+**Docstring requirement, stated plainly, not implied away:** this
+detector computes an EWMA-of-mean-absolute-deviation, rescaled by the
+MeanAD-to-sigma constant (`sqrt(pi/2) ~= 1.2533`) - not a true
+median/MAD, and not Iglewicz-Hoaglin's own formula, even though the
+3.5 threshold convention is reused from it. An exact-MAD variant would
+require retaining a sorted historical sample per bucket instead of an
+O(1) recursive update, which is precisely the state-size tradeoff this
+detector's streaming design exists to avoid.
+
+**Five schema corrections from review, before any migration runs:**
+
+1. `incidents.baseline_median` -> `baseline_mean`. Leftover from the
+   original MAD framing; this detector tracks an EWMA mean, never a
+   median (the correction two sections above).
+
+2. **Ordering: strict `window_end` ASC, with an explicit lag buffer
+   and an explicit skip-and-report path - not just an intention.** The
+   EWMA recursion is order-dependent - applying two windows' updates
+   in the wrong relative order produces a different, wrong `ewma_mean`
+   /`ewma_mad` than applying them correctly, unlike a commutative
+   aggregate (a sum) where arrival order wouldn't matter. Two distinct
+   lateness concerns, not one: (a) Kafka-to-window event-time
+   lateness, already resolved by `metrics_job.sql`'s own watermark
+   (270s bound, DEFENSE.md #40/#42) before a row ever reaches
+   `weir_metrics.window_metrics` - a window that closes has, by
+   construction, already absorbed everything the watermark was willing
+   to wait for; (b) **write-order lateness at the Postgres-ingestion
+   boundary** - nothing guarantees the JDBC sink's flush/commit order
+   across different windows matches strict `window_end` order (sink
+   batching, checkpoint timing, a restart re-emitting buffered writes).
+   It's (b) this detector's own read loop has to defend against, not
+   (a) - #40's p999 (11,309s) describes Kafka-arrival disorder that's
+   already resolved by the time a row exists in `window_metrics`.
+   Mechanism: each read cycle queries `window_metrics` rows not yet in
+   `scored_windows`, computes `max_window_end_seen`, and only processes
+   rows with `window_end <= max_window_end_seen - max_lag_seconds`
+   (a new config value; default reasoned, not measured against #40's
+   number, below), strictly in ascending `window_end` order, one
+   transaction per window (per #45's existing idempotency design). A
+   row that's still older than `detector_progress.last_processed_
+   window_end` when it's finally read - i.e., it arrived so late even
+   the lag buffer didn't hold long enough - gets a `scored_windows` row
+   with `status = 'skipped_late'`, `score = NULL`, never applied to
+   `baseline_state`'s EWMA. Counted and visible (V8), never silently
+   dropped. `max_lag_seconds` default: a few minutes, reasoned from
+   typical JDBC-sink-flush/checkpoint cadences (the write-order
+   concern this buffer actually exists for), not from #40's Kafka-
+   level p999 - that number belongs to a layer of the pipeline this
+   detector never sees directly.
+
+3. **`scored_windows.status IN ('scored', 'insufficient_baseline',
+   'skipped_late')`, `score`/`baseline_mean_at_time`/
+   `baseline_scale_at_time` all nullable, one row written in every
+   case.** Without this, the 8-week warmup period (DEFENSE.md #44) is
+   an accounting hole - windows that were seen but never scored would
+   leave no trace at all, and a benchmark computed only from `scored`
+   rows would silently undercount the denominator. Every window that
+   clears the ordering/lag check gets exactly one `scored_windows` row,
+   whichever of the three outcomes applies.
+
+4. **`baseline_state.alpha` and `.config_hash`, checked on every
+   update, failing loudly on mismatch.** `alpha` is the actual
+   numeric EWMA decay derived from `half_life_weeks` (DEFENSE.md #44);
+   `config_hash` is a hash of the full baseline-relevant config.
+   Stored per-bucket-row (redundant across all 168 rows for one
+   `detector_name`, not centralized) so any single row is self-
+   describing in isolation and a partially-corrupted state is still
+   individually checkable. If a config change (e.g. a different
+   `half_life_weeks`) is deployed against an already-warmed baseline,
+   the mismatch is detected and raised explicitly, rather than
+   silently continuing to update a baseline that's now a blend of two
+   different decay rates matching neither config.
+
+5. **`TIMESTAMPTZ`, not naive `TIMESTAMP`, in every `weir_incidents`
+   table - scoped to this new schema, not a retroactive fix to
+   `weir_metrics`.** `weir_metrics.window_metrics` (Part 3.1, already
+   5/5-verified) stores naive `TIMESTAMP` throughout and isn't being
+   touched here - re-opening an already-shipped, verified component
+   is a bigger, separate decision, not bundled into this one. Instead,
+   the volume detector's own reading adapter is the one place that
+   explicitly states and applies a timezone: `window_metrics.
+   window_start` is interpreted as America/New_York local civil time
+   (`AT TIME ZONE 'America/New_York'`, converting to a true UTC
+   instant) *before* being stored as `TIMESTAMPTZ` in `weir_incidents`
+   and before `bucket_weekday`/`bucket_hour` are derived from it.
+   Bucketing in UTC instead was considered and rejected: the entire
+   reason for (weekday, hour) bucketing is to capture genuine
+   behavioral seasonality (rush hour, overnight lulls) that people
+   observe in *local* civil time, not UTC - a UTC hour bucket would
+   mix two different local hours across the EST/EDT boundary,
+   blurring exactly the seasonality this detector exists to isolate.
+   **The DST fall-back's ambiguous hour (DEFENSE.md #44) recurs here,
+   at a second place in the pipeline**: `replay_producer.py` and
+   `metrics_job.sql` don't exclude it the way `load_pickup_
+   timestamps.py` does, so `window_metrics` still contains that hour's
+   data with no recoverable true UTC offset. Rather than lean on
+   Postgres's own (unverified, implementation-specific) default
+   disambiguation for an ambiguous `AT TIME ZONE` conversion, the
+   reading adapter applies #44's same policy a second time: those
+   specific windows are excluded from `baseline_state` updates,
+   explicitly, not guessed at. The inconsistency this exposes -
+   `load_pickup_timestamps.py` excludes the ambiguous hour,
+   `replay_producer.py`/`metrics_job.sql` don't - is a real gap,
+   logged in docs/FUTURE_WORK.md rather than silently left
+   unaddressed, and not fixed here since it touches an already-
+   verified upstream component out of this task's scope.
+
+**Four more corrections from a second review pass, applied to
+`reliability/store/incidents_schema.sql` before any migration ran:**
+
+1. `scored_windows_status_valid` CHECK, enforcing the three-value enum
+   at the database level. Free-text `status` means a typo creates a
+   silent fourth category and corrupts the V8 accounting it exists to
+   support - documenting the three valid values in a comment isn't
+   the same as making a fourth one impossible to write.
+
+2. `scored_windows_null_contract` CHECK, made a real biconditional.
+   The first draft only checked one direction (`status <> 'scored'`
+   implies all three NULL) and would have silently allowed a `'scored'`
+   row with a NULL `score` straight through - the exact gap this
+   constraint exists to close. Fixed to require both directions:
+   `'scored'` implies all three NOT NULL, anything else implies all
+   three NULL.
+
+3. Range CHECKs (`bucket_weekday BETWEEN 0 AND 6`,
+   `bucket_hour BETWEEN 0 AND 23`) on every table that has these
+   columns - `incidents`' version is NULL-aware since a future non-
+   bucketed detector type may not populate them at all. Catches a
+   timezone-conversion off-by-one (America/New_York vs UTC, DEFENSE.md
+   #45) at write time, as a rejected INSERT, instead of as an
+   inexplicable baseline discovered much later.
+
+4. `detector_progress.last_processed_window_end` (and
+   `baseline_state.last_window_end`) changed from nullable to a
+   `NOT NULL DEFAULT`. Nullable was a real bug waiting to happen: SQL's
+   three-valued logic makes `window_end <= NULL` evaluate to NULL, not
+   a real answer either way, and the equivalent comparison in
+   application code (against a Python `None`) would raise rather than
+   silently misbehave - but either way, "what happens on a detector's
+   very first window" would have been an unstated edge case discovered
+   by accident, not a decision made on purpose. A real, ordinary
+   comparable sentinel removes the ambiguity structurally: every
+   genuine `window_end` is trivially greater than it, so "is this
+   window behind the frontier" has exactly one correct, structural
+   answer (no) on a brand-new detector - no separate NULL-handling
+   branch needed anywhere in the comparison logic, and the default
+   lives on the column itself, not in application code that could be
+   called in an unexpected order.
+
+   **First choice, `'-infinity'::timestamptz`, was wrong - caught by
+   checking psycopg 3's own documentation before shipping it, not
+   after.** Confirmed (not assumed): psycopg 3, unlike psycopg2,
+   raises `DataError` by default when reading Postgres's
+   `'infinity'`/`'-infinity'` timestamp special values back into
+   Python, rather than mapping them to `datetime.min`/`max` the way
+   psycopg2 did. Given #45 already approved psycopg 3 as this
+   detector's Postgres client, the very first `SELECT` of this column
+   would have crashed - a sentinel that breaks the one thing it exists
+   to make safe. Switched to the Unix epoch
+   (`'1970-01-01T00:00:00+00'::timestamptz`) instead: an ordinary,
+   fully representable instant with no special-casing in any driver,
+   and - since every real TLC `window_end` starts in Oct 2024 - just
+   as reliably "less than any real window this system will ever see"
+   as `-infinity` was meant to be.
+
+**Two more real bugs, both caught while designing the detector core -
+before either reached actual detector code:**
+
+- **`scored_windows`'s own comment claimed `'insufficient_baseline'`
+  windows don't update `baseline_state` - wrong, and self-
+  contradictory.** If an under-warmed bucket's own windows never
+  updated `baseline_state`, `observation_count` could never reach
+  `min_observations` and the bucket could never warm up at all - a
+  chicken-and-egg bug in the schema's own documentation, not the
+  constraints. Corrected: every status except `'skipped_late'` updates
+  `baseline_state` (the warmup check happens against the bucket's
+  observation count *before* this window's own update is applied, so
+  `'scored'` means "was already warm," not "became warm just now").
+  `'skipped_late'` is the one status that never touches
+  `baseline_state`.
+
+- **The CI run that verified `scored_windows_status_valid` was
+  actually testing the wrong constraint.** Confirmed via 5/5-style
+  discipline applied to the CI output itself, not just its overall
+  conclusion: the test's own success message named
+  `scored_windows_null_contract` as the constraint that actually
+  fired, not `scored_windows_status_valid` as claimed - the test row
+  (`status='bogus_status'` with non-NULL `baseline_mean_at_time`/
+  `baseline_scale_at_time`/`score`) violated both constraints at once,
+  and Postgres reported whichever it evaluated first. Fixed two ways:
+  the row now sets all three nullable columns to NULL (satisfying
+  `null_contract`'s "not scored" branch on its own, isolating
+  `status_valid` as the only constraint left to violate), and
+  `expect_check_violation()` now takes an `expected_constraint`
+  argument and fails if the wrong one fires - so a test that passes
+  for the wrong reason can't happen silently a second time.
+
+**A third bug, caught writing `adapter.py`: the DST fall-back's
+ambiguous hour (DEFENSE.md #44/#45) had a documented exclusion policy
+but no actual status to record it under.** `scored_windows.status`
+only had three values, none of which fit "this window was seen but
+deliberately excluded because its true UTC offset can't be
+recovered" - it would have had to be misreported as some other status
+or silently skipped outright, either of which is exactly the kind of
+unaccounted-for record V8 exists to catch. Added a fourth status,
+`'dst_ambiguous_excluded'`, checked in `adapter.process_window`
+*before* the frontier lock is even taken (this exclusion doesn't
+depend on arrival order, so it doesn't need the same serialization
+the frontier check does) - real, if rare: `1/(7*24*60) ~= 0.01%` of
+all windows this detector will ever see fall in this one hour per
+year.
+
+## 46. Part 4.2: `reliability/volume/run.py` - the read cycle, and where the naive-local-time boundary actually gets crossed
+
+Written before `run.py`'s code, per D1.
+
+**Confirmed, not assumed: `weir_metrics.window_metrics.window_start`/
+`.window_end` are naive America/New_York civil time, not UTC.**
+Checked directly against `ingestion/replay/load_pickup_timestamps.py`
+and `ingestion/replay/replay_producer.py` - neither performs any
+UTC conversion anywhere; NYC TLC's own `tpep_pickup_datetime` is
+recorded in local wall-clock time by the source data and flows through
+Kafka and `metrics_job.sql`'s `TUMBLE` unmodified. This matters because
+`adapter.py`'s `process_window`/`to_local_bucket`/`is_dst_ambiguous`
+all require a genuinely UTC-aware `window_end` (DEFENSE.md #45) -
+`run.py` is the one place in this detector that performs the
+naive-local -> aware-UTC conversion #45 point 5 already named but
+didn't itself implement. Getting the direction of this conversion
+backwards (treating the naive value as if it were already UTC) would
+silently shift every bucket by the local UTC offset (4 or 5 hours)
+without raising anything - exactly the kind of off-by-one #45's own
+range CHECKs exist to catch at the *schema* level, but a wrong offset
+that still lands in 0-23 wouldn't trip a CHECK at all, only a
+comparison against real seasonality would ever surface it, and only
+by accident.
+
+**Mechanism: `naive_local.replace(tzinfo=ZoneInfo(timezone_name))`,
+then `.astimezone(datetime.timezone.utc)` - not `.astimezone()`
+alone.** `replace()` attaches a zone to the naive value without
+shifting the clock reading (correct: the naive value already *is*
+America/New_York wall-clock time); `astimezone()` alone on a naive
+value would instead assume the *system* zone, making the result
+depend on whatever machine happens to run this script. For the DST
+fall-back's ambiguous hour, `replace()` + `astimezone()` still
+produces *some* well-defined UTC instant (Python's default `fold=0`:
+the earlier of the two valid offsets, i.e. still-EDT) even though
+neither offset is verifiably the real one. Deliberately not resolved
+more carefully here: `adapter.is_dst_ambiguous` re-derives the
+NY-local naive value from whatever UTC instant it's handed and checks
+it against the exact same `DST_FALLBACK_AMBIGUOUS_HOURS` table, so the
+window is caught and excluded regardless of which of the two folds
+this conversion happened to pick - the correctness of the exclusion
+doesn't depend on `run.py` picking the "right" fold, only on the
+round trip landing back in the same one-hour range, which it always
+does for either fold.
+
+**Alternative considered and rejected: push the conversion into the
+SQL query itself** (`window_end AT TIME ZONE 'America/New_York' AT
+TIME ZONE 'UTC'`), letting Postgres do it instead of Python. Rejected
+because it would duplicate the same timezone semantics in two
+different languages/libraries (Postgres's `AT TIME ZONE` vs Python's
+`zoneinfo`) for no benefit at this detector's 1-window-per-minute
+cadence (DEFENSE.md #45's own reasoning for why a network round trip
+here is irrelevant) - one reviewable place for this logic
+(`adapter.py`'s pure helpers, now joined by `run.py`'s
+`to_utc_instant`) is worth more than a marginal query-side
+optimization, especially given how easy this exact boundary is to get
+backwards (previous paragraph).
+
+**Read cycle: implements #45 point 2's already-specified design, not
+a new one.** `detector_progress.last_processed_window_end` (a true
+UTC `TIMESTAMPTZ`) is converted to NY-local-naive terms *once* per
+run, then used directly against `window_metrics.window_end` (also
+naive, also NY-local) as a same-type, same-semantics SQL comparison -
+deliberately not a cross-timezone comparison in SQL, consistent with
+the previous paragraph's decision to keep all timezone logic in
+Python. Of the rows returned, `max_window_end_seen` is computed
+(still in naive-local terms - a fixed-duration subtraction for the lag
+buffer is insensitive to which naive representation it's done in,
+except within the one DST hour this detector already excludes
+separately), and only rows with `window_end <= max_window_end_seen -
+max_lag_seconds` are processed, strictly ascending. This query-level
+filter is a pure efficiency measure, not the correctness mechanism -
+correctness is `process_window`'s own transactional frontier check
+plus `scored_windows`' UNIQUE constraint (#45); a coarse or even
+slightly-wrong filter here just means a row gets picked up on a later
+run instead of this one, never processed incorrectly or twice.
+
+**Not a daemon.** `run.py` is a single pass: process everything
+currently eligible, then exit. Scheduling it repeatedly (cron, a
+systemd timer, a long-running loop) is a deployment concern, deferred
+along with the rest of Sprint 1's deployment scope - there's no
+deployment target yet to schedule it against (docs/FUTURE_WORK.md).
+
+## 47. `incidents/dev/volume_drop.py` - a direct-write dev trigger, not a pipeline-level fault injector
+
+Written before the script's code, per D1.
+
+**Decision: writes one synthetic row straight into
+`weir_metrics.window_metrics`, never touches Kafka/Flink/the replay
+producer.** Real alternative, stated before rejecting it: suppress a
+fraction of `replay_producer.py`'s real emissions for a target window
+so the drop flows through actual Flink aggregation. Rejected for this
+tool specifically:
+
+- Hard rule 2 requires `benchmarks/` never import from `incidents/dev/`
+  - the two are structurally separate on purpose, and a dev trigger
+  that requires the full Kafka/Flink stack blurs that boundary from
+  the other side: it would need the same live infrastructure a real
+  benchmark scenario needs, for a tool whose entire point is a fast
+  local dev loop while building/debugging the detector itself.
+- This project already has a live-pipeline-based real-data check on
+  the roadmap (the real-data integration test, next). Building a
+  second, separate mechanism to inject a fault *into* the live
+  pipeline would duplicate that surface for no distinct benefit - the
+  dev trigger's job is "give the detector one deliberately anomalous
+  row to react to right now," not "prove the whole pipeline reacts to
+  a fault correctly."
+- Direct SQL is exactly this project's own established pattern for
+  exercising Postgres-side logic in isolation:
+  `scripts/verify_incidents_schema.py` inserts synthetic rows
+  directly for the same reason - it's testing/exercising the
+  consumer, not re-proving the producer.
+
+**Deliberately reuses `run.py`'s normal read path unchanged - no
+special-casing.** The injected row is picked up by the same
+`fetch_eligible_windows` query as any real window; the detector has
+no way to distinguish a dev-injected row from a real one, which is
+the point - exercising the dev trigger also exercises the runner and
+the adapter's transaction, not a separate code path that could drift
+from what real data actually goes through.
+
+**Target window defaults to the next minute after
+`MAX(window_end)` currently in `window_metrics`** (or the current
+UTC time, floored to the minute and converted to naive local, if the
+table is empty) - not a fixed hardcoded timestamp. `run.py`'s
+frontier only advances forward, so a fixed default would work exactly
+once per fresh database and then silently fail every following
+invocation (`window_end <= frontier` -> `skipped_late`, no incident
+possible). Advancing off the real high-water mark means repeated
+invocations during a dev session keep working without the caller
+tracking state by hand. `--window-end` is available to override this
+for a specific bucket.
+
+**Prints the target bucket's current `baseline_state` (mean, MAD,
+derived scale, warmup status) before writing, per V3** - not just
+"row inserted." Without this, picking a `--row-count` that will
+actually cross the detector's threshold (or deliberately won't) is
+guesswork; the whole reason to run this tool by hand is to see the
+detector react to a value you chose knowingly; against a MAD=0 or
+still-warming bucket, the printed scale-floor components frequently
+make the current row-count choice's likely outcome (or lack of one)
+obvious *before* running `run.py` at all, matching this project's
+"never invent a plausible-looking number" instinct at the tooling
+level, not just in benchmark results (hard rule 1).
+
+**`ON CONFLICT (window_start, window_end) DO UPDATE`, not a plain
+`INSERT`.** Matches `adapter.py`'s own `baseline_state` upsert
+pattern. A dev iterating on threshold/`row_count` choices for the
+same target window (the common case - "try again with a smaller
+drop") re-runs this script against the same window rather than being
+forced to compute a fresh one every time; nothing about this table's
+own correctness depends on inserts being append-only the way
+`scored_windows` deliberately is (#45).
+
+## 48. `scripts/verify_volume_detector.py` - the real-data integration check, and what it deliberately doesn't claim
+
+Written before the script's code, per D1.
+
+**Decision: a standalone `verify_*.py` script run by its own
+dispatch-only workflow, not a `tests/integration/` pytest file.**
+Real alternative, stated before rejecting it:
+`tests/integration/test_load_pickup_timestamps.py`'s own pattern -
+`pytest.mark.skipif` when the real infrastructure it needs isn't
+present, so it's harmless if `pytest -q tests/` (`ci.yml`'s automatic
+gate) picks it up. Rejected here specifically because that test's
+skip condition is cheap to satisfy accidentally (a few real parquet
+files sitting in `data/tlc/`) while this check's real dependency is
+the *entire* Kafka+Postgres+Flink stack actually up and the metrics
+job actually run against real data - `replay-verify.yml`'s own header
+comment already names this exact tradeoff for a different check
+("too slow for the normal per-push gate"). A standalone script that
+only exists as a step inside its own `workflow_dispatch`-only
+workflow has no path to accidentally executing on every push; a
+pytest file with a skip condition does, if that condition is ever
+accidentally satisfied in the shared CI environment (services left
+running from an earlier job, a persisted volume). See docs/CI.md and
+CLAUDE.md C6 for the two-tier model this keeps intact.
+
+**Decision: reuses `scripts/verify_metrics_job.py` to populate real
+data, rather than re-implementing replay+Flink orchestration a second
+time.** That script already does the real work this check needs as a
+prerequisite - applies `schema.sql` fresh, runs `replay_producer.py`
+against a real downloaded month, runs `metrics_job.sql` via the SQL
+client, confirms rows landed. Real alternative rejected: have this
+new script drive Kafka/Flink itself. Rejected because it would
+duplicate `verify_metrics_job.py`'s own orchestration for no benefit -
+the same "one reviewable place" reasoning as #46's SQL-vs-Python
+timezone decision. The new workflow simply runs `verify_metrics_job.py`
+first, then this script second, against the same live stack.
+
+**Decision: the real month is 2024-11, not 2025-01 (`metrics-job-
+verify.yml`'s existing month).** Real alternative: reuse 2025-01,
+already downloaded/exercised elsewhere, to avoid a second ~59MB
+download. Rejected: 2024-11 is the one month containing the real DST
+fall-back (Nov 3, 2024) - the only way to verify `dst_ambiguous_
+excluded` (#47) against genuine data instead of only the synthetic
+unit tests in `test_volume_adapter.py`/`test_volume_run.py`. A month
+without that transition would let this check pass while a real
+timezone-boundary regression (#46) went completely unexercised by
+anything touching real data.
+
+**Honest scope limit, stated plainly rather than implied away: one
+real month cannot warm any bucket's baseline, and this check does not
+claim it does.** `min_observations` = 480 (8 weeks x 60
+windows/bucket-occurrence, DEFENSE.md #44); one month gives each
+(weekday, hour) bucket roughly 4-5 occurrences x 60 = ~240-300 raw
+updates - computed and asserted exactly from the real data actually
+read, not estimated here. Every row this check processes is
+therefore expected to be `insufficient_baseline`, `skipped_late`, or
+`dst_ambiguous_excluded` - **never** `scored`, and the check asserts
+this exact absence rather than silently not checking for it (hard
+rule 3 is about not tuning a detector to pass a scenario; this is the
+adjacent honesty requirement - not implying a check exercised
+something it structurally cannot). Whether this detector actually
+flags a real incident against real, fully-warmed data is
+`benchmarks/`'s job once it exists (still `.gitkeep` only - not built
+this session), not this integration check's - logged as a real,
+unaddressed gap in docs/FUTURE_WORK.md rather than left implicit.
+
+**What's actually verified, each computed independently of the
+detector under test (V7), never unaccounted-for (V8):**
+
+1. Every real `window_metrics` row for 2024-11 has exactly one
+   `scored_windows` row - counted by a direct `COUNT(*)` comparison
+   between the two tables for this detector, not by trusting `run.py`'s
+   own printed count.
+2. Every real row whose naive `window_end` falls in `[2024-11-03
+   01:00, 02:00)` - independently selected straight from
+   `window_metrics`, not via `DST_FALLBACK_AMBIGUOUS_HOURS` or
+   `is_dst_ambiguous` - has `status = 'dst_ambiguous_excluded'` in
+   `scored_windows`, and that count is greater than zero (a sanity
+   check that real trips actually exist in that hour, matching
+   `test_dst_ambiguous_hour_dropped_matches_independent_count`'s own
+   discipline in `test_load_pickup_timestamps.py`).
+3. Zero `scored_windows` rows for this detector have `status =
+   'scored'` (the honest-scope-limit assertion above, made concrete).
+4. Each touched bucket's `baseline_state.observation_count` equals the
+   real count of non-`dst_ambiguous_excluded`,
+   non-`skipped_late` `window_metrics` rows that fall in that bucket -
+   independently aggregated straight from `window_metrics` by
+   `(EXTRACT(DOW ...), EXTRACT(HOUR ...))` in local time, not by
+   trusting `baseline_state`'s own running count.
+
+## 49. `verify_metrics_job.py`'s ground truth assumed a fixed NYC TLC column set - `cbd_congestion_fee` doesn't exist before 2025-01
+
+First real bug from this session's first actual dispatch against a live
+stack (`volume-detector-verify.yml`, targeting 2024-11 for #48's real
+DST coverage) - in already-shipped, previously 5/5-verified Part 3.1
+code, not anything built this session. Confirmed, not assumed: `pq.
+read_table(...).to_pylist()` raised `KeyError: 'cbd_congestion_fee'`
+computing ground truth for a 2024-11 window - that file's own parquet
+schema genuinely has no such column (NYC's congestion-pricing fee
+started 2025-01-05), not merely null-valued. `NULL_COLS`/`STAT_COLS`
+hardcoded it, along with every other column, as always-present -
+correct for every month this had ever actually run against (only
+2025-01, via `metrics-job-verify.yml`) but never exercised against an
+earlier month until now.
+
+**Decision: schema-aware - skip a column for every list it appears in
+(`NULL_COLS`/`DISTINCT_COLS`/`NEGATIVE_COLS`/`STAT_COLS`) when it's
+absent from `table.column_names`, not just the one list that happened
+to crash first.** Two real alternatives, stated before rejecting them:
+
+- Special-case `cbd_congestion_fee` only. Rejected: the same crash
+  recurs for `Airport_fee` (added later than the earliest TLC months)
+  or any future column NYC adds or removes - a narrow fix teaches
+  nothing about the general shape of the problem, which is "this
+  project's assumed column set isn't actually fixed across real
+  months," not "this one column is special."
+- Abandon 2024-11, reuse 2025-01 (already exercised, already has every
+  column). Rejected: 2025-01 has no DST fall-back to exercise -
+  reusing it would mean #48's whole reason for choosing 2024-11 (real
+  DST coverage, not just the synthetic unit tests) goes unmet, trading
+  away the actual point of this check to avoid fixing a bug the check
+  itself exists to surface.
+
+**The expected-count assertion (`69`) is now derived, not
+hand-adjusted for this one case.** A first draft computed a corrected
+constant by hand (`69 - 4` for this specific column); rejected before
+committing it - that number would silently be wrong for a future
+month missing a *different* column with a different list membership
+(e.g. one only in `NULL_COLS`, contributing 1 fewer, not 4). Fixed to
+accumulate `skipped_metric_count` inline, in the same loops that build
+`expected` - the count-check can no longer drift from the computation
+it's checking, because it's produced by the same code path, not a
+parallel formula that has to be kept in sync by hand.
+
+**A second, related bug caught reviewing this fix before committing
+it, not after: the mismatch-reporting block was dropped entirely
+mid-edit** (a stray replacement left `PASS: stage 8` printing
+unconditionally, even with real mismatches in the list) - caught by
+re-reading the diff immediately after making it, restored before any
+commit or dispatch. Recorded per this project's own standard: an
+error caught by re-checking one's own work is still worth writing
+down, not just silently fixed.
+
+**Suspected, not yet confirmed: `weir_metrics.fan_out_window_metrics_
+wide()`'s trigger (`reliability/store/schema.sql`) may have the same
+class of bug one layer deeper, in already-shipped production code this
+fix does not touch.** The trigger's `INSERT ... SELECT ... FROM
+(VALUES (...))` has no `WHERE metric_value IS NOT NULL` filter, and
+`column_metrics.metric_value` is `NOT NULL`. `MIN`/`MAX`/`AVG` over an
+entirely-null column (exactly what `cbd_congestion_fee` would be for
+every row in a month where it's absent) return SQL `NULL`, which -
+reasoned through here, not yet observed - would make the whole
+multi-row `INSERT` fail the `NOT NULL` constraint and abort, taking
+the JDBC sink's own write down with it for every window that month.
+If real, this would mean `metrics_job.sql`'s Postgres sink cannot
+process ANY month lacking any one of its hardcoded columns, not just
+2024-11 - a real gap in already-verified Part 3.1 code, if confirmed.
+Deliberately not fixed here without seeing it actually fail first
+(this project's "confirmed, not assumed" discipline applied to my own
+hypothesis, not just the code) - and because it touches a different,
+more consequential piece of already-shipped code than this entry's own
+scope.
+
+## 50. Confirmed: `fan_out_window_metrics_wide()`'s trigger crashes the whole JDBC write when any hardcoded aggregate column is entirely null
+
+#49's hypothesis, confirmed by dispatching `volume-detector-verify.yml`
+a second time against real 2024-11 data, not left as reasoning alone.
+Real error, not inferred:
+
+```
+weir-postgres | ERROR: null value in column "metric_value" of
+  relation "column_metrics" violates not-null constraint
+weir-flink-jobmanager | PL/pgSQL function weir_metrics.
+  fan_out_window_metrics_wide() line 7 at SQL statement
+  Caused by: java.lang.RuntimeException: Writing records to JDBC failed.
+```
+
+`MIN`/`MAX`/`AVG` over `cbd_congestion_fee` (entirely absent from
+2024-11's real schema, #49) return SQL `NULL` for every window that
+month. The trigger's `INSERT ... SELECT ... FROM (VALUES (...))` had
+no filter excluding a `NULL` `metric_value` against a `NOT NULL`
+target column - Postgres rejected the whole multi-row `INSERT`, which
+took the JDBC sink's checkpoint down with it, repeatedly, for every
+window in the month. This is why `verify_metrics_job.py`'s Stage 7
+timed out waiting for the target window's row - it never landed at
+all, not just with fewer columns than expected.
+
+**Decision: `WHERE m.metric_value IS NOT NULL` on the trigger's
+`INSERT ... SELECT`, mirroring #49's fix rather than introducing a
+second convention.** A genuinely-uncomputable aggregate (no real
+values in this window, for this column) is now simply not written -
+absence of a `(window_start, window_end, column_name, metric_name)`
+row becomes the documented signal "nothing to compute here," matching
+exactly what `verify_metrics_job.py`'s ground truth now also expects
+(no entry, not a placeholder value) for the same case.
+
+**Alternative considered and rejected: make `column_metrics.
+metric_value` nullable and insert the `NULL` as-is.** Rejected as a
+bigger, farther-reaching change than this bug needs: every downstream
+reader of `column_metrics` (the volume detector doesn't read this
+table at all, but a future column-level detector might) would then
+have to handle a NULL metric_value explicitly, everywhere, forever -
+versus "the row for this column/window/metric might not exist," which
+is a narrower, already-familiar shape (every reader of a SQL table
+already has to handle "no matching row").
+
+**This bug predates this session's own changes by definition - it is
+in `reliability/store/schema.sql`'s trigger, Part 3.1, already
+"5/5-verified" (DEFENSE.md #37) months ago, but only ever verified
+against 2025-01, the one month with every hardcoded column present.**
+Any earlier NYC TLC month - not just 2024-11 - would trigger the same
+crash for whichever columns didn't exist yet in that month's real
+schema (`Airport_fee`, `congestion_surcharge`, and `cbd_congestion_
+fee` were each added to the real dataset at different points in NYC
+TLC's own history, not all at once). This wasn't caught by the
+original 5/5 verification because that discipline verifies "5 clean
+runs of the same scenario," not "5 runs across different real
+months" - a real gap in what "verified" meant for this component,
+worth carrying forward: a fixed-schema assumption tested against only
+one month's real data is a narrower guarantee than it may read as.

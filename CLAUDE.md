@@ -41,6 +41,17 @@ section specifically.
   ever. Enforced by `scripts/check_pinned_images.sh`.
 - **C5** — CI runs every test in `tests/`. Untested code is not done.
 
+## CI
+
+Two tiers: what runs automatically on push/PR, and five
+`workflow_dispatch`-only verification workflows that don't. See
+[docs/CI.md](docs/CI.md) for the full list and why each one is manual.
+
+- **C6** — A `workflow_dispatch`-only verification covering a branch's
+  changes must be dispatched and green before that branch merges to
+  main. The workflow existing, or a stale green run against older code,
+  does not satisfy C5 for this tier.
+
 ## Hard rules
 
 1. NEVER invent, estimate, or placeholder a metric value. Detection rates,
@@ -105,6 +116,18 @@ number.
 - **V6.** Failures and expected-failures must be distinguishable in
   logs. A failed send during a kill test is not data loss and must not
   read as a gap.
+- **V7.** Ground truth is computed INDEPENDENTLY of the system under
+  test. Expected values come from the source data or the emission log,
+  never from the pipeline being verified.
+- **V8.** Unaccounted-for records must be explained, not tolerated. If
+  713 of 6000 events aren't in the result, the test states why and
+  asserts that reason.
+
+## Security
+
+- **S1.** Never paste a token, key, or credential into a message, log,
+  script, or commit. Env vars only.
+- **S2.** gitleaks or detect-secrets runs in pre-commit and CI.
 
 ## Design Before Code
 
@@ -142,3 +165,12 @@ D1. For any non-trivial component, the DEFENSE.md entry explaining the
   provided, not just the keys this project cares about, and that has
   to be verified explicitly (diff against the image's own default file,
   don't assume a hand-written file is complete).
+- **E8.** An idle source subtask holds back the merged watermark. The
+  durable fix is `table.exec.source.idle-timeout`, NOT parallelism=1.
+- **E9.** Calcite's `INTERVAL` grammar defaults to 2-digit precision.
+  Use `SECOND(3)`.
+- **E10.** Python in CI needs `-u` or stdout buffering swallows
+  diagnostics on failure.
+- **E11.** Postgres composite-type inference in
+  `UNNEST(ARRAY[ROW(...)])` is unreliable. Use `VALUES (...) AS
+  m(cols)`.

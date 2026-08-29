@@ -22,6 +22,15 @@ if this block doesn't match a fresh regeneration.
 No benchmark run yet.
 <!-- BENCHMARK:END -->
 
+**On the volume detector's false-positive rate specifically, once published:**
+read it as an upper bound, not a settled number. Its baseline uses 8 weekly
+samples per (weekday, hour) bucket, below the n≥20-30 robust-stats guidance
+generally wants for a stable robust scale estimate (DEFENSE.md #44) — a
+noisier MAD pushes a measured false-positive rate up, not down, so the real
+rate is more likely lower than whatever gets published than higher. A longer
+baseline than this project's ~17 weeks of replay data would likely lower it
+further.
+
 ## Status
 
 Sprint 1 is in progress. Infrastructure (Kafka, PostgreSQL, SeaweedFS,

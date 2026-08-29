@@ -10,10 +10,12 @@ against a second copy of the SQL's own arithmetic.
 
 Two checks, per V1 (exact parsed values, not "looks about right"):
 
-1. Deep check: every one of the 69 column_metrics rows plus
-   window_metrics.row_count for ONE specific, certainly-closed window,
-   computed independently in Python from the source parquet rows that
-   fall in it.
+1. Deep check: every column_metrics row (69 when every NULL_COLS/
+   STAT_COLS column is present in this file's own schema - fewer for
+   a real month missing one, e.g. cbd_congestion_fee before 2025-01,
+   DEFENSE.md #49) plus window_metrics.row_count for ONE specific,
+   certainly-closed window, computed independently in Python from the
+   source parquet rows that fall in it.
 2. Broad check: SUM(row_count) across every window that Flink's
    watermark (last event time - 270s, DEFENSE.md #42) guarantees has
    closed, compared against an independently computed count from the
@@ -223,15 +225,49 @@ def main():
                  "improvement_surcharge", "total_amount", "congestion_surcharge", "Airport_fee",
                  "cbd_congestion_fee", "passenger_count"]
 
+    # NYC TLC's own column set isn't fixed across months - cbd_congestion_fee
+    # (congestion pricing) only exists from 2025-01 onward and is genuinely
+    # absent, not just null, from earlier files' own schema (confirmed via
+    # table.column_names, not inferred from an all-null column - those are
+    # different real cases, handled separately below). A column missing
+    # from this file's schema is skipped for every list it appears in, not
+    # just the one that happened to crash first - DEFENSE.md #49.
+    available_columns = set(table.column_names)
+    skipped_absent = [c for c in set(NULL_COLS + DISTINCT_COLS + NEGATIVE_COLS + STAT_COLS)
+                       if c not in available_columns]
+    if skipped_absent:
+        print(f"columns absent from this file's own schema (not null - structurally missing): {sorted(skipped_absent)}")
+
     expected = {}
+    skipped_metric_count = 0
     for col in NULL_COLS:
+        if col not in available_columns:
+            skipped_metric_count += 1
+            continue
         expected[(col, "null_count")] = float(sum(1 for r in target_rows if r[col] is None))
     for col in DISTINCT_COLS:
+        if col not in available_columns:
+            skipped_metric_count += 1
+            continue
         expected[(col, "distinct_count")] = float(len(set(r[col] for r in target_rows)))
     for col in NEGATIVE_COLS:
+        if col not in available_columns:
+            skipped_metric_count += 1
+            continue
         expected[(col, "negative_count")] = float(sum(1 for r in target_rows if r[col] is not None and r[col] < 0))
     for col in STAT_COLS:
+        if col not in available_columns:
+            skipped_metric_count += 3  # min, max, mean
+            continue
         vals = [r[col] for r in target_rows if r[col] is not None]
+        if not vals:
+            # Column exists but every value in this window is null (SQL
+            # MIN/MAX/AVG over an all-null group is NULL, not a real
+            # number) - nothing this check can assert a ground-truth
+            # value against, so it's skipped the same as a structurally
+            # absent column, not asserted as 0 or any other placeholder.
+            skipped_metric_count += 3
+            continue
         expected[(col, "min")] = float(min(vals))
         expected[(col, "max")] = float(max(vals))
         expected[(col, "mean")] = sum(vals) / len(vals)
@@ -239,9 +275,11 @@ def main():
         1 for r in target_rows if r["tpep_dropoff_datetime"] < r["tpep_pickup_datetime"]))
     expected[("trip_duration", "zero_count")] = float(sum(
         1 for r in target_rows if r["tpep_dropoff_datetime"] == r["tpep_pickup_datetime"]))
-    print(f"computed {len(expected)} expected (column_name, metric_name) -> value pairs (expect 69)")
-    if len(expected) != 69:
-        fail(f"expected exactly 69 metrics per window per DEFENSE.md #41/#42, computed {len(expected)}")
+    expected_metric_count = 69 - skipped_metric_count
+    print(f"computed {len(expected)} expected (column_name, metric_name) -> value pairs (expect {expected_metric_count})")
+    if len(expected) != expected_metric_count:
+        fail(f"expected exactly {expected_metric_count} metrics per window per DEFENSE.md #41/#42/#49, "
+             f"computed {len(expected)}")
 
     print("\n=== Stage 5: services healthy (kafka, postgres, flink) ===")
     wait_for_healthy(["weir-kafka", "weir-postgres", "weir-flink-jobmanager", "weir-flink-taskmanager"])
@@ -309,7 +347,7 @@ def main():
     actual_row_count = float(rows_found[0][0])
     print(f"PASS: stage 7 - target window present, row_count={actual_row_count}")
 
-    print("\n=== Stage 8: deep check - all 69 column_metrics values for the target window ===")
+    print(f"\n=== Stage 8: deep check - all {expected_metric_count} column_metrics values for the target window ===")
     cm_rows = psql(args.pg_container, args.pg_user, args.pg_db,
                    f"SELECT column_name, metric_name, metric_value FROM weir_metrics.column_metrics "
                    f"WHERE window_start = '{target_ws_sql}' ORDER BY column_name, metric_name;")
@@ -325,15 +363,15 @@ def main():
             mismatches.append(f"{key}: MISSING from column_metrics")
         elif not math.isclose(actual_val, expected_val, rel_tol=1e-9, abs_tol=1e-9):
             mismatches.append(f"{key}: expected {expected_val!r}, got {actual_val!r}")
-    if len(actual) != 69:
-        mismatches.append(f"column_metrics row count for target window: expected 69, got {len(actual)}")
+    if len(actual) != expected_metric_count:
+        mismatches.append(f"column_metrics row count for target window: expected {expected_metric_count}, got {len(actual)}")
 
     if mismatches:
         print_raw("all expected vs actual", json.dumps(
             {"expected": {f"{k[0]}|{k[1]}": v for k, v in expected.items()},
              "actual": {f"{k[0]}|{k[1]}": v for k, v in actual.items()}}, indent=2))
         fail("deep check mismatches:\n  " + "\n  ".join(mismatches))
-    print(f"PASS: stage 8 - all 69 metrics + row_count exactly match independently computed ground truth")
+    print(f"PASS: stage 8 - all {expected_metric_count} metrics + row_count exactly match independently computed ground truth")
 
     print("\n=== Stage 9: broad check - SUM(row_count) across all closed windows ===")
     sum_rows = psql(args.pg_container, args.pg_user, args.pg_db,
