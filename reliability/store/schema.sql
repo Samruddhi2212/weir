@@ -229,6 +229,7 @@ BEGIN
         ('trip_duration', 'negative_count', NEW.trip_duration_negative_count::double precision),
         ('trip_duration', 'zero_count', NEW.trip_duration_zero_count::double precision)
     ) AS m(column_name, metric_name, metric_value)
+    WHERE m.metric_value IS NOT NULL
     ON CONFLICT (window_start, window_end, column_name, metric_name) DO UPDATE SET metric_value = EXCLUDED.metric_value;
 
     RETURN NEW;

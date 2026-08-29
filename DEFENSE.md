@@ -3163,3 +3163,61 @@ Deliberately not fixed here without seeing it actually fail first
 hypothesis, not just the code) - and because it touches a different,
 more consequential piece of already-shipped code than this entry's own
 scope.
+
+## 50. Confirmed: `fan_out_window_metrics_wide()`'s trigger crashes the whole JDBC write when any hardcoded aggregate column is entirely null
+
+#49's hypothesis, confirmed by dispatching `volume-detector-verify.yml`
+a second time against real 2024-11 data, not left as reasoning alone.
+Real error, not inferred:
+
+```
+weir-postgres | ERROR: null value in column "metric_value" of
+  relation "column_metrics" violates not-null constraint
+weir-flink-jobmanager | PL/pgSQL function weir_metrics.
+  fan_out_window_metrics_wide() line 7 at SQL statement
+  Caused by: java.lang.RuntimeException: Writing records to JDBC failed.
+```
+
+`MIN`/`MAX`/`AVG` over `cbd_congestion_fee` (entirely absent from
+2024-11's real schema, #49) return SQL `NULL` for every window that
+month. The trigger's `INSERT ... SELECT ... FROM (VALUES (...))` had
+no filter excluding a `NULL` `metric_value` against a `NOT NULL`
+target column - Postgres rejected the whole multi-row `INSERT`, which
+took the JDBC sink's checkpoint down with it, repeatedly, for every
+window in the month. This is why `verify_metrics_job.py`'s Stage 7
+timed out waiting for the target window's row - it never landed at
+all, not just with fewer columns than expected.
+
+**Decision: `WHERE m.metric_value IS NOT NULL` on the trigger's
+`INSERT ... SELECT`, mirroring #49's fix rather than introducing a
+second convention.** A genuinely-uncomputable aggregate (no real
+values in this window, for this column) is now simply not written -
+absence of a `(window_start, window_end, column_name, metric_name)`
+row becomes the documented signal "nothing to compute here," matching
+exactly what `verify_metrics_job.py`'s ground truth now also expects
+(no entry, not a placeholder value) for the same case.
+
+**Alternative considered and rejected: make `column_metrics.
+metric_value` nullable and insert the `NULL` as-is.** Rejected as a
+bigger, farther-reaching change than this bug needs: every downstream
+reader of `column_metrics` (the volume detector doesn't read this
+table at all, but a future column-level detector might) would then
+have to handle a NULL metric_value explicitly, everywhere, forever -
+versus "the row for this column/window/metric might not exist," which
+is a narrower, already-familiar shape (every reader of a SQL table
+already has to handle "no matching row").
+
+**This bug predates this session's own changes by definition - it is
+in `reliability/store/schema.sql`'s trigger, Part 3.1, already
+"5/5-verified" (DEFENSE.md #37) months ago, but only ever verified
+against 2025-01, the one month with every hardcoded column present.**
+Any earlier NYC TLC month - not just 2024-11 - would trigger the same
+crash for whichever columns didn't exist yet in that month's real
+schema (`Airport_fee`, `congestion_surcharge`, and `cbd_congestion_
+fee` were each added to the real dataset at different points in NYC
+TLC's own history, not all at once). This wasn't caught by the
+original 5/5 verification because that discipline verifies "5 clean
+runs of the same scenario," not "5 runs across different real
+months" - a real gap in what "verified" meant for this component,
+worth carrying forward: a fixed-schema assumption tested against only
+one month's real data is a narrower guarantee than it may read as.
