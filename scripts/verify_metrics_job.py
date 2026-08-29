@@ -227,45 +227,45 @@ def main():
 
     # NYC TLC's own column set isn't fixed across months - cbd_congestion_fee
     # (congestion pricing) only exists from 2025-01 onward and is genuinely
-    # absent, not just null, from earlier files' own schema (confirmed via
-    # table.column_names, not inferred from an all-null column - those are
-    # different real cases, handled separately below). A column missing
-    # from this file's schema is skipped for every list it appears in, not
-    # just the one that happened to crash first - DEFENSE.md #49.
+    # absent, not just null, from earlier files' own schema. But a column
+    # missing from the source parquet is indistinguishable, at the Flink
+    # table level, from one that's declared and simply null on every row -
+    # metrics_job.sql's Kafka source table declares every column (nullable),
+    # so a genuinely missing JSON field is read as NULL, not an error.
+    # null_count/distinct_count/negative_count are COUNT-shaped and
+    # ALWAYS computable even when every value is null (a real, non-NULL
+    # 0 or n, never SQL NULL) - only MIN/MAX/AVG (STAT_COLS) produce a
+    # true SQL NULL with zero non-null values to aggregate. Confirmed
+    # the hard way: an earlier version of this fix skipped null_count too
+    # for an absent column, computing 65 expected metrics against a real
+    # 66 the trigger actually wrote (DEFENSE.md #49 addendum) - null_count
+    # for cbd_congestion_fee is a real row (value = n), just never a
+    # min/max/mean one.
     available_columns = set(table.column_names)
-    skipped_absent = [c for c in set(NULL_COLS + DISTINCT_COLS + NEGATIVE_COLS + STAT_COLS)
-                       if c not in available_columns]
+    skipped_absent = [c for c in (NULL_COLS + DISTINCT_COLS + NEGATIVE_COLS + STAT_COLS)
+                      if c not in available_columns]
     if skipped_absent:
-        print(f"columns absent from this file's own schema (not null - structurally missing): {sorted(skipped_absent)}")
+        print(f"columns absent from this file's own schema (not null - structurally missing): {sorted(set(skipped_absent))}")
 
     expected = {}
     skipped_metric_count = 0
     for col in NULL_COLS:
-        if col not in available_columns:
-            skipped_metric_count += 1
-            continue
-        expected[(col, "null_count")] = float(sum(1 for r in target_rows if r[col] is None))
+        expected[(col, "null_count")] = float(sum(1 for r in target_rows if r.get(col) is None))
     for col in DISTINCT_COLS:
-        if col not in available_columns:
-            skipped_metric_count += 1
-            continue
-        expected[(col, "distinct_count")] = float(len(set(r[col] for r in target_rows)))
+        expected[(col, "distinct_count")] = float(len(set(r.get(col) for r in target_rows)))
     for col in NEGATIVE_COLS:
-        if col not in available_columns:
-            skipped_metric_count += 1
-            continue
-        expected[(col, "negative_count")] = float(sum(1 for r in target_rows if r[col] is not None and r[col] < 0))
+        expected[(col, "negative_count")] = float(sum(1 for r in target_rows if r.get(col) is not None and r.get(col) < 0))
     for col in STAT_COLS:
-        if col not in available_columns:
-            skipped_metric_count += 3  # min, max, mean
-            continue
-        vals = [r[col] for r in target_rows if r[col] is not None]
+        vals = [r.get(col) for r in target_rows if r.get(col) is not None]
         if not vals:
-            # Column exists but every value in this window is null (SQL
-            # MIN/MAX/AVG over an all-null group is NULL, not a real
-            # number) - nothing this check can assert a ground-truth
-            # value against, so it's skipped the same as a structurally
-            # absent column, not asserted as 0 or any other placeholder.
+            # Zero non-null values - whether because the column is
+            # entirely absent from this file's schema or because every
+            # row happens to be null this window, SQL MIN/MAX/AVG over
+            # an empty/all-null group is NULL, not a real number -
+            # nothing this check can assert a ground-truth value
+            # against, so it's skipped rather than asserted as 0 or
+            # any other placeholder (matching the trigger's own
+            # WHERE metric_value IS NOT NULL, DEFENSE.md #50).
             skipped_metric_count += 3
             continue
         expected[(col, "min")] = float(min(vals))

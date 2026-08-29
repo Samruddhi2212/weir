@@ -3164,6 +3164,27 @@ hypothesis, not just the code) - and because it touches a different,
 more consequential piece of already-shipped code than this entry's own
 scope.
 
+**Addendum, caught by the very next real dispatch (after #50's trigger
+fix landed): this entry's own first fix skipped `null_count` too
+eagerly for an absent column, computing 65 expected metrics against a
+real 66.** `null_count` (`COUNT(*) - COUNT(col)`), `distinct_count`
+(`COUNT(DISTINCT col)`), and `negative_count` are COUNT-shaped and
+always produce a real, non-NULL value - even `n` nulls out of `n` rows
+is a valid count, never SQL `NULL` the way `MIN`/`MAX`/`AVG` over zero
+non-null values is. `metrics_job.sql`'s Kafka source table declares
+`cbd_congestion_fee` (nullable) regardless of whether any given
+month's real JSON messages happen to contain that key, so a
+genuinely-missing field and an explicitly-null one are indistinguishable
+once Flink has typed the row - `null_count` gets written as a real
+row (value `n`) either way, and only the three `STAT_COLS` entries
+(`min`/`max`/`mean`) are ever actually absent. Fixed: `NULL_COLS`/
+`DISTINCT_COLS`/`NEGATIVE_COLS` now always compute (via `dict.get`,
+never `continue`-skipped for an absent column) - only `STAT_COLS`
+skips, and only when its own `vals` list ends up empty, which now
+correctly covers both "column absent" and "column present but
+all-null this window" as the same case, matching `#50`'s trigger fix
+exactly rather than a second, independently-derived rule.
+
 ## 50. Confirmed: `fan_out_window_metrics_wide()`'s trigger crashes the whole JDBC write when any hardcoded aggregate column is entirely null
 
 #49's hypothesis, confirmed by dispatching `volume-detector-verify.yml`
