@@ -3002,3 +3002,91 @@ forced to compute a fresh one every time; nothing about this table's
 own correctness depends on inserts being append-only the way
 `scored_windows` deliberately is (#45).
 
+## 48. `scripts/verify_volume_detector.py` - the real-data integration check, and what it deliberately doesn't claim
+
+Written before the script's code, per D1.
+
+**Decision: a standalone `verify_*.py` script run by its own
+dispatch-only workflow, not a `tests/integration/` pytest file.**
+Real alternative, stated before rejecting it:
+`tests/integration/test_load_pickup_timestamps.py`'s own pattern -
+`pytest.mark.skipif` when the real infrastructure it needs isn't
+present, so it's harmless if `pytest -q tests/` (`ci.yml`'s automatic
+gate) picks it up. Rejected here specifically because that test's
+skip condition is cheap to satisfy accidentally (a few real parquet
+files sitting in `data/tlc/`) while this check's real dependency is
+the *entire* Kafka+Postgres+Flink stack actually up and the metrics
+job actually run against real data - `replay-verify.yml`'s own header
+comment already names this exact tradeoff for a different check
+("too slow for the normal per-push gate"). A standalone script that
+only exists as a step inside its own `workflow_dispatch`-only
+workflow has no path to accidentally executing on every push; a
+pytest file with a skip condition does, if that condition is ever
+accidentally satisfied in the shared CI environment (services left
+running from an earlier job, a persisted volume). See docs/CI.md and
+CLAUDE.md C6 for the two-tier model this keeps intact.
+
+**Decision: reuses `scripts/verify_metrics_job.py` to populate real
+data, rather than re-implementing replay+Flink orchestration a second
+time.** That script already does the real work this check needs as a
+prerequisite - applies `schema.sql` fresh, runs `replay_producer.py`
+against a real downloaded month, runs `metrics_job.sql` via the SQL
+client, confirms rows landed. Real alternative rejected: have this
+new script drive Kafka/Flink itself. Rejected because it would
+duplicate `verify_metrics_job.py`'s own orchestration for no benefit -
+the same "one reviewable place" reasoning as #46's SQL-vs-Python
+timezone decision. The new workflow simply runs `verify_metrics_job.py`
+first, then this script second, against the same live stack.
+
+**Decision: the real month is 2024-11, not 2025-01 (`metrics-job-
+verify.yml`'s existing month).** Real alternative: reuse 2025-01,
+already downloaded/exercised elsewhere, to avoid a second ~59MB
+download. Rejected: 2024-11 is the one month containing the real DST
+fall-back (Nov 3, 2024) - the only way to verify `dst_ambiguous_
+excluded` (#47) against genuine data instead of only the synthetic
+unit tests in `test_volume_adapter.py`/`test_volume_run.py`. A month
+without that transition would let this check pass while a real
+timezone-boundary regression (#46) went completely unexercised by
+anything touching real data.
+
+**Honest scope limit, stated plainly rather than implied away: one
+real month cannot warm any bucket's baseline, and this check does not
+claim it does.** `min_observations` = 480 (8 weeks x 60
+windows/bucket-occurrence, DEFENSE.md #44); one month gives each
+(weekday, hour) bucket roughly 4-5 occurrences x 60 = ~240-300 raw
+updates - computed and asserted exactly from the real data actually
+read, not estimated here. Every row this check processes is
+therefore expected to be `insufficient_baseline`, `skipped_late`, or
+`dst_ambiguous_excluded` - **never** `scored`, and the check asserts
+this exact absence rather than silently not checking for it (hard
+rule 3 is about not tuning a detector to pass a scenario; this is the
+adjacent honesty requirement - not implying a check exercised
+something it structurally cannot). Whether this detector actually
+flags a real incident against real, fully-warmed data is
+`benchmarks/`'s job once it exists (still `.gitkeep` only - not built
+this session), not this integration check's - logged as a real,
+unaddressed gap in docs/FUTURE_WORK.md rather than left implicit.
+
+**What's actually verified, each computed independently of the
+detector under test (V7), never unaccounted-for (V8):**
+
+1. Every real `window_metrics` row for 2024-11 has exactly one
+   `scored_windows` row - counted by a direct `COUNT(*)` comparison
+   between the two tables for this detector, not by trusting `run.py`'s
+   own printed count.
+2. Every real row whose naive `window_end` falls in `[2024-11-03
+   01:00, 02:00)` - independently selected straight from
+   `window_metrics`, not via `DST_FALLBACK_AMBIGUOUS_HOURS` or
+   `is_dst_ambiguous` - has `status = 'dst_ambiguous_excluded'` in
+   `scored_windows`, and that count is greater than zero (a sanity
+   check that real trips actually exist in that hour, matching
+   `test_dst_ambiguous_hour_dropped_matches_independent_count`'s own
+   discipline in `test_load_pickup_timestamps.py`).
+3. Zero `scored_windows` rows for this detector have `status =
+   'scored'` (the honest-scope-limit assertion above, made concrete).
+4. Each touched bucket's `baseline_state.observation_count` equals the
+   real count of non-`dst_ambiguous_excluded`,
+   non-`skipped_late` `window_metrics` rows that fall in that bucket -
+   independently aggregated straight from `window_metrics` by
+   `(EXTRACT(DOW ...), EXTRACT(HOUR ...))` in local time, not by
+   trusting `baseline_state`'s own running count.
