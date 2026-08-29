@@ -3090,3 +3090,76 @@ detector under test (V7), never unaccounted-for (V8):**
    independently aggregated straight from `window_metrics` by
    `(EXTRACT(DOW ...), EXTRACT(HOUR ...))` in local time, not by
    trusting `baseline_state`'s own running count.
+
+## 49. `verify_metrics_job.py`'s ground truth assumed a fixed NYC TLC column set - `cbd_congestion_fee` doesn't exist before 2025-01
+
+First real bug from this session's first actual dispatch against a live
+stack (`volume-detector-verify.yml`, targeting 2024-11 for #48's real
+DST coverage) - in already-shipped, previously 5/5-verified Part 3.1
+code, not anything built this session. Confirmed, not assumed: `pq.
+read_table(...).to_pylist()` raised `KeyError: 'cbd_congestion_fee'`
+computing ground truth for a 2024-11 window - that file's own parquet
+schema genuinely has no such column (NYC's congestion-pricing fee
+started 2025-01-05), not merely null-valued. `NULL_COLS`/`STAT_COLS`
+hardcoded it, along with every other column, as always-present -
+correct for every month this had ever actually run against (only
+2025-01, via `metrics-job-verify.yml`) but never exercised against an
+earlier month until now.
+
+**Decision: schema-aware - skip a column for every list it appears in
+(`NULL_COLS`/`DISTINCT_COLS`/`NEGATIVE_COLS`/`STAT_COLS`) when it's
+absent from `table.column_names`, not just the one list that happened
+to crash first.** Two real alternatives, stated before rejecting them:
+
+- Special-case `cbd_congestion_fee` only. Rejected: the same crash
+  recurs for `Airport_fee` (added later than the earliest TLC months)
+  or any future column NYC adds or removes - a narrow fix teaches
+  nothing about the general shape of the problem, which is "this
+  project's assumed column set isn't actually fixed across real
+  months," not "this one column is special."
+- Abandon 2024-11, reuse 2025-01 (already exercised, already has every
+  column). Rejected: 2025-01 has no DST fall-back to exercise -
+  reusing it would mean #48's whole reason for choosing 2024-11 (real
+  DST coverage, not just the synthetic unit tests) goes unmet, trading
+  away the actual point of this check to avoid fixing a bug the check
+  itself exists to surface.
+
+**The expected-count assertion (`69`) is now derived, not
+hand-adjusted for this one case.** A first draft computed a corrected
+constant by hand (`69 - 4` for this specific column); rejected before
+committing it - that number would silently be wrong for a future
+month missing a *different* column with a different list membership
+(e.g. one only in `NULL_COLS`, contributing 1 fewer, not 4). Fixed to
+accumulate `skipped_metric_count` inline, in the same loops that build
+`expected` - the count-check can no longer drift from the computation
+it's checking, because it's produced by the same code path, not a
+parallel formula that has to be kept in sync by hand.
+
+**A second, related bug caught reviewing this fix before committing
+it, not after: the mismatch-reporting block was dropped entirely
+mid-edit** (a stray replacement left `PASS: stage 8` printing
+unconditionally, even with real mismatches in the list) - caught by
+re-reading the diff immediately after making it, restored before any
+commit or dispatch. Recorded per this project's own standard: an
+error caught by re-checking one's own work is still worth writing
+down, not just silently fixed.
+
+**Suspected, not yet confirmed: `weir_metrics.fan_out_window_metrics_
+wide()`'s trigger (`reliability/store/schema.sql`) may have the same
+class of bug one layer deeper, in already-shipped production code this
+fix does not touch.** The trigger's `INSERT ... SELECT ... FROM
+(VALUES (...))` has no `WHERE metric_value IS NOT NULL` filter, and
+`column_metrics.metric_value` is `NOT NULL`. `MIN`/`MAX`/`AVG` over an
+entirely-null column (exactly what `cbd_congestion_fee` would be for
+every row in a month where it's absent) return SQL `NULL`, which -
+reasoned through here, not yet observed - would make the whole
+multi-row `INSERT` fail the `NOT NULL` constraint and abort, taking
+the JDBC sink's own write down with it for every window that month.
+If real, this would mean `metrics_job.sql`'s Postgres sink cannot
+process ANY month lacking any one of its hardcoded columns, not just
+2024-11 - a real gap in already-verified Part 3.1 code, if confirmed.
+Deliberately not fixed here without seeing it actually fail first
+(this project's "confirmed, not assumed" discipline applied to my own
+hypothesis, not just the code) - and because it touches a different,
+more consequential piece of already-shipped code than this entry's own
+scope.
