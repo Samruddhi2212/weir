@@ -1,0 +1,68 @@
+name: Volume Detector Real-Data Verification (Part 4.2/4.3)
+
+# Manual trigger only, matching this project's other workflow_dispatch
+# verification jobs. Needs Kafka, Postgres, and Flink - reuses
+# verify_metrics_job.py to populate real data rather than
+# re-implementing that orchestration a second time (DEFENSE.md #48).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  verify:
+    name: Populate real 2024-11 data, run the volume detector against it, verify V7/V8 accounting
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install pyarrow kafka-python==3.0.11
+          pip install -r reliability/volume/requirements.txt
+      - name: Build Flink image (picks up docker/flink/Dockerfile changes)
+        run: docker compose build flink-jobmanager flink-taskmanager
+      - name: Start Kafka, Postgres, Flink
+        run: docker compose up -d kafka postgres flink-jobmanager flink-taskmanager
+      - name: Wait for services healthy
+        run: |
+          EXPECTED_SERVICES="weir-kafka weir-postgres weir-flink-jobmanager weir-flink-taskmanager"
+          WAITED=0
+          MAX_WAIT=180
+          while true; do
+            PS_OUTPUT="$(docker compose ps)"
+            all_healthy=1
+            for svc in $EXPECTED_SERVICES; do
+              line="$(echo "$PS_OUTPUT" | grep "^$svc[[:space:]]" || true)"
+              if [ -z "$line" ] || ! echo "$line" | grep -q "(healthy)"; then
+                all_healthy=0
+                break
+              fi
+            done
+            [ "$all_healthy" -eq 1 ] && break
+            WAITED=$((WAITED + 5))
+            if [ "$WAITED" -ge "$MAX_WAIT" ]; then
+              echo "$PS_OUTPUT"
+              docker compose logs kafka postgres flink-jobmanager flink-taskmanager
+              echo "FAIL: not all of [$EXPECTED_SERVICES] healthy after ${MAX_WAIT}s"
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "$PS_OUTPUT"
+      - name: Download NYC TLC Yellow Taxi data (2024-11 - the real DST fall-back month, DEFENSE.md #48)
+        run: python ingestion/replay/download_tlc_data.py --year-month 2024-11 --output-dir data/tlc
+      - name: Populate real data via the existing metrics job verification
+        run: |
+          python -u scripts/verify_metrics_job.py \
+            --input data/tlc/yellow_tripdata_2024-11.parquet \
+            --bootstrap-server localhost:${KAFKA_EXTERNAL_PORT:-29092}
+      - name: Apply incidents_schema.sql and run the volume detector against it
+        run: python -u scripts/verify_volume_detector.py --port "${POSTGRES_PORT:-5432}"
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs kafka postgres flink-jobmanager flink-taskmanager
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
