@@ -2931,3 +2931,74 @@ systemd timer, a long-running loop) is a deployment concern, deferred
 along with the rest of Sprint 1's deployment scope - there's no
 deployment target yet to schedule it against (docs/FUTURE_WORK.md).
 
+## 47. `incidents/dev/volume_drop.py` - a direct-write dev trigger, not a pipeline-level fault injector
+
+Written before the script's code, per D1.
+
+**Decision: writes one synthetic row straight into
+`weir_metrics.window_metrics`, never touches Kafka/Flink/the replay
+producer.** Real alternative, stated before rejecting it: suppress a
+fraction of `replay_producer.py`'s real emissions for a target window
+so the drop flows through actual Flink aggregation. Rejected for this
+tool specifically:
+
+- Hard rule 2 requires `benchmarks/` never import from `incidents/dev/`
+  - the two are structurally separate on purpose, and a dev trigger
+  that requires the full Kafka/Flink stack blurs that boundary from
+  the other side: it would need the same live infrastructure a real
+  benchmark scenario needs, for a tool whose entire point is a fast
+  local dev loop while building/debugging the detector itself.
+- This project already has a live-pipeline-based real-data check on
+  the roadmap (the real-data integration test, next). Building a
+  second, separate mechanism to inject a fault *into* the live
+  pipeline would duplicate that surface for no distinct benefit - the
+  dev trigger's job is "give the detector one deliberately anomalous
+  row to react to right now," not "prove the whole pipeline reacts to
+  a fault correctly."
+- Direct SQL is exactly this project's own established pattern for
+  exercising Postgres-side logic in isolation:
+  `scripts/verify_incidents_schema.py` inserts synthetic rows
+  directly for the same reason - it's testing/exercising the
+  consumer, not re-proving the producer.
+
+**Deliberately reuses `run.py`'s normal read path unchanged - no
+special-casing.** The injected row is picked up by the same
+`fetch_eligible_windows` query as any real window; the detector has
+no way to distinguish a dev-injected row from a real one, which is
+the point - exercising the dev trigger also exercises the runner and
+the adapter's transaction, not a separate code path that could drift
+from what real data actually goes through.
+
+**Target window defaults to the next minute after
+`MAX(window_end)` currently in `window_metrics`** (or the current
+UTC time, floored to the minute and converted to naive local, if the
+table is empty) - not a fixed hardcoded timestamp. `run.py`'s
+frontier only advances forward, so a fixed default would work exactly
+once per fresh database and then silently fail every following
+invocation (`window_end <= frontier` -> `skipped_late`, no incident
+possible). Advancing off the real high-water mark means repeated
+invocations during a dev session keep working without the caller
+tracking state by hand. `--window-end` is available to override this
+for a specific bucket.
+
+**Prints the target bucket's current `baseline_state` (mean, MAD,
+derived scale, warmup status) before writing, per V3** - not just
+"row inserted." Without this, picking a `--row-count` that will
+actually cross the detector's threshold (or deliberately won't) is
+guesswork; the whole reason to run this tool by hand is to see the
+detector react to a value you chose knowingly; against a MAD=0 or
+still-warming bucket, the printed scale-floor components frequently
+make the current row-count choice's likely outcome (or lack of one)
+obvious *before* running `run.py` at all, matching this project's
+"never invent a plausible-looking number" instinct at the tooling
+level, not just in benchmark results (hard rule 1).
+
+**`ON CONFLICT (window_start, window_end) DO UPDATE`, not a plain
+`INSERT`.** Matches `adapter.py`'s own `baseline_state` upsert
+pattern. A dev iterating on threshold/`row_count` choices for the
+same target window (the common case - "try again with a smaller
+drop") re-runs this script against the same window rather than being
+forced to compute a fresh one every time; nothing about this table's
+own correctness depends on inserts being append-only the way
+`scored_windows` deliberately is (#45).
+
