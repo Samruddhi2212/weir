@@ -24,8 +24,16 @@ under test (V7), never unaccounted-for (V8):
 import argparse
 import datetime
 import sys
+from pathlib import Path
 
 import psycopg
+
+# Running this file directly (`python scripts/verify_volume_detector.py`)
+# only puts scripts/ itself on sys.path, not the repo root - unlike
+# pytest, which resolves reliability.volume.* correctly on its own.
+# Every other verify_*.py script has no project-internal imports and
+# never hit this; this is the first one that does.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from reliability.volume.config import DEFAULT_CONFIG
 from reliability.volume.run import run_once, to_naive_local
