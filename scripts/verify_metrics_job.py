@@ -106,6 +106,10 @@ def main():
     p.add_argument("--bootstrap-server", required=True)
     p.add_argument("--topic", default="weir-metrics-verify")
     p.add_argument("--limit", type=int, default=6000)
+    p.add_argument("--resume-after-timestamp", default=None,
+                   help="passed through to replay_producer.py - seek near a specific date "
+                        "(e.g. a real DST transition) instead of always starting at the file's "
+                        "first row")
     p.add_argument("--speed-factor", type=float, default=50000.0)
     p.add_argument("--max-inter-arrival-sleep", type=float, default=0.05)
     p.add_argument("--checkpoint-interval", default="10s")
@@ -145,7 +149,7 @@ def main():
 
     print("\n=== Stage 3: replay real TLC data (in-order, emission log recorded) ===")
     emission_log = tempfile.NamedTemporaryFile(prefix="weir_metrics_emission_", suffix=".jsonl", delete=False).name
-    replay = run([
+    replay_cmd = [
         sys.executable, "ingestion/replay/replay_producer.py",
         "--input", args.input,
         "--bootstrap-server", args.bootstrap_server,
@@ -154,7 +158,10 @@ def main():
         "--speed-factor", str(args.speed_factor),
         "--max-inter-arrival-sleep", str(args.max_inter_arrival_sleep),
         "--emission-log", emission_log,
-    ], timeout=300)
+    ]
+    if args.resume_after_timestamp:
+        replay_cmd += ["--resume-after-timestamp", args.resume_after_timestamp]
+    replay = run(replay_cmd, timeout=300)
     print_raw("replay_producer.py", replay.stdout + replay.stderr)
     if replay.returncode != 0:
         fail(f"replay_producer.py exited {replay.returncode} - broker did not confirm all sends (V5)")
