@@ -3242,3 +3242,67 @@ runs of the same scenario," not "5 runs across different real
 months" - a real gap in what "verified" meant for this component,
 worth carrying forward: a fixed-schema assumption tested against only
 one month's real data is a narrower guarantee than it may read as.
+
+## 51. `run.py`'s lag buffer can never fully drain a finite, already-complete dataset - added `assume_no_more_arrivals`
+
+Confirmed by real dispatch, not reasoned in advance this time: the
+first real run of `verify_volume_detector.py` against 2024-11 (once
+#49's import fix let it actually execute) reported `window_metrics has
+76 real rows but scored_windows has 71` - 5 short, exactly
+`max_lag_seconds` (300s = 5 one-minute windows).
+
+**Root cause: `fetch_eligible_windows` re-derives "the max" from
+whatever's currently in its own query result, which is correct for a
+live stream but never converges for a finite, already-complete
+batch.** Pass 1 (76 rows): `max_window_end_seen` = row 76's end;
+filters to `window_end <= max - 300s`, processing rows 1-71 and
+excluding 72-76 as "too recent to trust." Pass 2 (the remaining 5
+rows, 72-76): `max_window_end_seen` is now row 76's end again (the max
+of just this smaller batch) - all 5 remaining rows are, by
+construction, within 300s of *that*, so all 5 get excluded again.
+This repeats forever; no number of passes ever processes the true
+tail of a static dataset, because each pass's own notion of "the
+current tail" is relative to whatever's left, not to a real "no more
+data is coming" fact the buffer has no way to know on its own.
+
+This is not a bug against a live stream, where the buffer's whole job
+is exactly this: never trust the most recent few minutes until more
+time has actually passed and nothing arrived behind them. It's a real
+gap for a bounded, already-loaded dataset, which is exactly what a
+real-data integration check needs.
+
+**Decision: `assume_no_more_arrivals=False` (default) on
+`fetch_eligible_windows`/`run_once` - `True` skips the lag-buffer
+filter entirely.** Real alternative, stated before rejecting it:
+leave `run.py` untouched and adjust `verify_volume_detector.py`'s V7/V8
+assertion to expect exactly `max_lag_seconds` worth of permanently-
+unprocessed rows at the end of any finite batch, as a documented
+consequence rather than a gap to close. Rejected: that would mean this
+integration check can never actually confirm the real DST fall-back
+hour's exclusion or the honest-scope-limit assertion for whichever
+windows happen to fall in that permanently-stuck tail - a real
+verification hole that just moves depending on the file's own row
+count, not a stable, understood boundary. A caller-supplied flag,
+default `False`, keeps live-polling's write-order protection exactly
+as designed (#45) while giving a backfill/verification caller - who
+genuinely knows no more writes are coming for this range - a correct
+way to say so, rather than working around an accounting gap the
+buffer itself can't detect.
+
+`verify_volume_detector.py` now calls `run_once(..., assume_no_more_
+arrivals=True)` once, not `run_once` twice hoping a second pass
+catches the tail - the two-pass workaround never actually worked (the
+math above), it just silently looked like it might.
+
+**`assume_no_more_arrivals=True` must NEVER be used by the benchmark
+runner, once it exists.** The benchmark measures detection latency
+(README's own differentiator) - skipping the lag buffer means every
+window gets scored the instant it appears, reporting batch-processing
+speed, not streaming detection latency, which would make that number
+meaningless without anyone having tuned or faked anything, just by
+calling this flag from the wrong caller. This flag is for
+verification/backfill against an already-complete file only. If the
+benchmark ever hits this same non-convergent-tail symptom, the fix is
+to append a synthetic trailing window past the frontier (giving the
+buffer something real to clear against), never to disable the buffer
+to make the symptom go away.
