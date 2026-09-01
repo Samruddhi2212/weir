@@ -87,9 +87,14 @@ def main():
              "against 2024-11 first")
     print(f"real window_metrics rows present: {real_window_count}")
 
-    statuses = run_once(conn, config)
-    statuses += run_once(conn, config)  # second pass: catches the lag-buffered tail
-    print(f"run.py processed {len(statuses)} window(s) across two passes")
+    # assume_no_more_arrivals=True: this month's data is already fully
+    # loaded by verify_metrics_job.py above, not a live stream - the
+    # lag buffer's write-order protection doesn't apply to an already-
+    # complete historical file, and would otherwise leave the last
+    # max_lag_seconds worth of windows permanently unprocessed no
+    # matter how many passes are run (DEFENSE.md #51).
+    statuses = run_once(conn, config, assume_no_more_arrivals=True)
+    print(f"run.py processed {len(statuses)} window(s)")
 
     print("\n=== Stage 3: every real window is accounted for (V7/V8) ===")
     with conn.cursor() as cur:
