@@ -109,3 +109,15 @@ directories or files exist for these.
   and unaddressed; fixing it means touching `replay_producer.py` and/or
   `metrics_job.sql`, both already shipped and 5/5-verified (Part 2.1/3.1),
   which is a bigger, separate decision than this detector's own scope.
+
+- **`metrics_job.sql`'s `AVG(passenger_count)` produced a wrong value
+  against a real November 2024 window** - confirmed directly against
+  the source parquet: 132 real rows, 25 null, non-null values 1-5,
+  true mean 1.439; Postgres reported 1.0. `MIN`/`MAX` for the same
+  column, same window, were both correct, and `window_metrics.row_count`
+  and every null_count matched - so this isn't corrupted source values
+  or a window-boundary mismatch, something in the `AVG` computation
+  itself. Never surfaced before because CI had only ever exercised this
+  job's Stage 8 deep-check against 2025-01. Not root-caused - would need
+  Flink checkpoint/aggregation-internals digging beyond what
+  `volume-detector-verify.yml` needs (it only reads `row_count`).
