@@ -121,3 +121,10 @@ directories or files exist for these.
   job's Stage 8 deep-check against 2025-01. Not root-caused - would need
   Flink checkpoint/aggregation-internals digging beyond what
   `volume-detector-verify.yml` needs (it only reads `row_count`).
+
+- **Event-delay drift detection** - a detector scoring `lateness_p50/
+  p99/max_seconds` (actual event-time delay distribution, distinct from
+  the freshness detector's arrival-gap signal) is blocked on those
+  `window_metrics` columns never being populated by `metrics_job.sql`
+  (DEFENSE.md #52). Real, scoped-out work, not forgotten - needs the
+  watermark/lateness computation wired into the Flink job first.
