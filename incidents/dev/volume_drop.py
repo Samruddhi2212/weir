@@ -11,6 +11,15 @@ injected row looks like any other window_metrics row to the detector.
 """
 import argparse
 import datetime
+import sys
+from pathlib import Path
+
+# Running this file directly (`python incidents/dev/volume_drop.py`) only
+# puts incidents/dev/ itself on sys.path, not the repo root - confirmed by
+# scripts/verify_volume_detector.py hitting exactly this on its first real
+# dispatch (DEFENSE.md #48's addendum); fixed here before this script's own
+# first real run hits the same ModuleNotFoundError.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from reliability.volume.adapter import to_local_bucket
 from reliability.volume.config import DEFAULT_CONFIG

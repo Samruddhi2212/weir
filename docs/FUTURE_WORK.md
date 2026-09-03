@@ -85,6 +85,18 @@ directories or files exist for these.
   multi-month real data against the reproducible failure catalog, not
   this integration check's.
 
+- **When `benchmarks/`'s runner is built, it must never call
+  `run.py`/`run_once` with `assume_no_more_arrivals=True`** (DEFENSE.md
+  #51). That flag skips the lag buffer entirely - fine for
+  `verify_volume_detector.py`'s already-complete historical file, but
+  it would make the benchmark's own detection-latency number
+  meaningless (every window scored the instant it appears, measuring
+  batch-processing speed instead of streaming latency) without
+  anyone having tuned or fabricated anything - just by calling this
+  flag from the wrong caller. If the benchmark runner hits the same
+  non-convergent-tail symptom #51 describes, the fix is a synthetic
+  trailing window past the frontier, not disabling the buffer.
+
 - **`replay_producer.py`/`metrics_job.sql` don't exclude the DST
   fall-back's ambiguous hour (Nov 3 2024, 01:00–01:59 local) the way
   `load_pickup_timestamps.py` does** (DEFENSE.md #44/#45) — so
@@ -97,3 +109,15 @@ directories or files exist for these.
   and unaddressed; fixing it means touching `replay_producer.py` and/or
   `metrics_job.sql`, both already shipped and 5/5-verified (Part 2.1/3.1),
   which is a bigger, separate decision than this detector's own scope.
+
+- **`metrics_job.sql`'s `AVG(passenger_count)` produced a wrong value
+  against a real November 2024 window** - confirmed directly against
+  the source parquet: 132 real rows, 25 null, non-null values 1-5,
+  true mean 1.439; Postgres reported 1.0. `MIN`/`MAX` for the same
+  column, same window, were both correct, and `window_metrics.row_count`
+  and every null_count matched - so this isn't corrupted source values
+  or a window-boundary mismatch, something in the `AVG` computation
+  itself. Never surfaced before because CI had only ever exercised this
+  job's Stage 8 deep-check against 2025-01. Not root-caused - would need
+  Flink checkpoint/aggregation-internals digging beyond what
+  `volume-detector-verify.yml` needs (it only reads `row_count`).

@@ -24,8 +24,16 @@ under test (V7), never unaccounted-for (V8):
 import argparse
 import datetime
 import sys
+from pathlib import Path
 
 import psycopg
+
+# Running this file directly (`python scripts/verify_volume_detector.py`)
+# only puts scripts/ itself on sys.path, not the repo root - unlike
+# pytest, which resolves reliability.volume.* correctly on its own.
+# Every other verify_*.py script has no project-internal imports and
+# never hit this; this is the first one that does.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from reliability.volume.config import DEFAULT_CONFIG
 from reliability.volume.run import run_once, to_naive_local
@@ -79,9 +87,14 @@ def main():
              "against 2024-11 first")
     print(f"real window_metrics rows present: {real_window_count}")
 
-    statuses = run_once(conn, config)
-    statuses += run_once(conn, config)  # second pass: catches the lag-buffered tail
-    print(f"run.py processed {len(statuses)} window(s) across two passes")
+    # assume_no_more_arrivals=True: this month's data is already fully
+    # loaded by verify_metrics_job.py above, not a live stream - the
+    # lag buffer's write-order protection doesn't apply to an already-
+    # complete historical file, and would otherwise leave the last
+    # max_lag_seconds worth of windows permanently unprocessed no
+    # matter how many passes are run (DEFENSE.md #51).
+    statuses = run_once(conn, config, assume_no_more_arrivals=True)
+    print(f"run.py processed {len(statuses)} window(s)")
 
     print("\n=== Stage 3: every real window is accounted for (V7/V8) ===")
     with conn.cursor() as cur:
@@ -104,7 +117,7 @@ def main():
     with conn.cursor() as cur:
         cur.execute(
             "SELECT COUNT(*) FROM weir_metrics.window_metrics "
-            "WHERE window_end > %s AND window_end <= %s",
+            "WHERE window_end >= %s AND window_end < %s",
             (datetime.datetime(2024, 11, 3, 1, 0, 0), datetime.datetime(2024, 11, 3, 2, 0, 0)),
         )
         (real_dst_row_count,) = cur.fetchone()
