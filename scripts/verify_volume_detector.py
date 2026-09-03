@@ -117,7 +117,7 @@ def main():
     with conn.cursor() as cur:
         cur.execute(
             "SELECT COUNT(*) FROM weir_metrics.window_metrics "
-            "WHERE window_end > %s AND window_end <= %s",
+            "WHERE window_end >= %s AND window_end < %s",
             (datetime.datetime(2024, 11, 3, 1, 0, 0), datetime.datetime(2024, 11, 3, 2, 0, 0)),
         )
         (real_dst_row_count,) = cur.fetchone()
