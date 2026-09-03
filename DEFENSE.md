@@ -3306,3 +3306,17 @@ benchmark ever hits this same non-convergent-tail symptom, the fix is
 to append a synthetic trailing window past the frontier (giving the
 buffer something real to clear against), never to disable the buffer
 to make the symptom go away.
+
+## 52. Freshness detector: arrival gap, not lateness - the lateness columns aren't populated
+
+Decision: observed_value is the gap in seconds between a real window's
+window_end and the previous real window's - not lateness_p50/p99/max_seconds.
+Real alternative, rejected: those columns exist in window_metrics and are
+named for exactly this, but metrics_job.sql never actually populates them
+(schema.sql's own comment already says so) - every real row has them NULL.
+Arrival gap is a different, better-fitting signal anyway: "is data still
+arriving on schedule" is directly what window_end already answers, no
+upstream work needed, and it's the more literal reading of "freshness" -
+lateness is event-delay distribution, a different (also real, still
+blocked) detector. Logged as a scoped-out future item in FUTURE_WORK.md
+rather than left implicit.
