@@ -3306,3 +3306,15 @@ benchmark ever hits this same non-convergent-tail symptom, the fix is
 to append a synthetic trailing window past the frontier (giving the
 buffer something real to clear against), never to disable the buffer
 to make the symptom go away.
+
+## 53. Null-rate detector: one detector_name per monitored column, no schema change
+
+Decision: detector_name = f"null_rate_{column_name}" (e.g. "null_rate_passenger_count"),
+one instance per column, rather than adding a column_name dimension to
+baseline_state/scored_windows' bucketing key. weir_incidents' tables are
+already multi-tenant by detector_name; reusing that dimension for
+"which column" needs zero schema changes and keeps every existing
+constraint/query pattern working unchanged. Rejected: a real
+column_name column on every table - more general in the abstract, but
+no other detector needs it, and CLAUDE.md's own C2 argues against
+carrying a dimension nothing uses yet.
