@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from reliability.nullrate.config import config_for_column
 from reliability.nullrate.run import run_once
+from reliability.volume.run import to_utc_instant
 
 COLUMN = "passenger_count"
 
@@ -98,29 +99,49 @@ def main():
     print(f"PASS: stage 3 - all {real_window_count} real windows have exactly one scored_windows row")
 
     print("\n=== Stage 4: every scored null_rate matches an independently computed rate, and is in [0, 1] ===")
+    # scored_windows.window_end is TIMESTAMPTZ (true UTC, converted by
+    # run.py); window_metrics/column_metrics' is naive local TIMESTAMP.
+    # Joining the two directly in SQL silently compares incompatible
+    # representations and matches nothing - converted in Python instead
+    # (DEFENSE.md #46's own reasoning, missed on the first draft of
+    # this check: a raw SQL join here isn't the "second AT TIME ZONE
+    # cast" that entry rejected, but it's the same class of mistake).
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT sw.window_start, sw.window_end, sw.observed_value, cm.metric_value, wm.row_count "
-            "FROM weir_incidents.scored_windows sw "
-            "JOIN weir_metrics.window_metrics wm "
-            "  ON wm.window_start = sw.window_start AND wm.window_end = sw.window_end "
-            "JOIN weir_metrics.column_metrics cm "
-            "  ON cm.window_start = sw.window_start AND cm.window_end = sw.window_end "
-            "  AND cm.column_name = %s AND cm.metric_name = 'null_count' "
-            "WHERE sw.detector_name = %s",
-            (COLUMN, config.detector_name),
+            "SELECT window_end, observed_value FROM weir_incidents.scored_windows "
+            "WHERE detector_name = %s",
+            (config.detector_name,),
         )
-        joined_rows = cur.fetchall()
+        scored_rows = cur.fetchall()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT wm.window_end, cm.metric_value, wm.row_count "
+            "FROM weir_metrics.window_metrics wm "
+            "JOIN weir_metrics.column_metrics cm "
+            "  ON cm.window_start = wm.window_start AND cm.window_end = wm.window_end "
+            "WHERE cm.column_name = %s AND cm.metric_name = 'null_count'",
+            (COLUMN,),
+        )
+        source_by_utc_end = {
+            to_utc_instant(window_end_naive, config.timezone): (null_count, row_count)
+            for window_end_naive, null_count, row_count in cur.fetchall()
+        }
 
     mismatches = []
-    for window_start, window_end, scored_value, null_count, row_count in joined_rows:
+    for window_end_utc, scored_value in scored_rows:
+        source = source_by_utc_end.get(window_end_utc)
+        if source is None:
+            mismatches.append((window_end_utc, scored_value, "no matching source row"))
+            continue
+        null_count, row_count = source
         expected_rate = null_count / row_count
         if not (0.0 <= scored_value <= 1.0) or abs(scored_value - expected_rate) > 1e-9:
-            mismatches.append((window_start, window_end, scored_value, expected_rate))
+            mismatches.append((window_end_utc, scored_value, expected_rate))
     if mismatches:
         fail(f"{len(mismatches)} scored null_rate value(s) don't match independent computation "
              f"or fall outside [0, 1]: {mismatches[:5]}")
-    print(f"PASS: stage 4 - all {len(joined_rows)} scored null_rate values match independently, all in [0, 1]")
+    print(f"PASS: stage 4 - all {len(scored_rows)} scored null_rate values match independently, all in [0, 1]")
 
     print("\n=== Stage 5: baseline_state.observation_count matches an independent per-bucket count ===")
     with conn.cursor() as cur:
