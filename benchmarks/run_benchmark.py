@@ -277,7 +277,41 @@ def write_stream(events, path):
     return path
 
 
-def populate(args, stream_path, expected_count, label):
+def max_explainable_loss(scenarios, clean_events):
+    """Upper bound on events the pipeline may legitimately fail to land.
+
+    Only two scenarios can cause the pipeline to drop data: the backfill
+    replays months-old copies that are far past the watermark, and the
+    out-of-order flood makes part of its span arrive late. Bounding by
+    "every event those two touch" deliberately over-counts rather than
+    predicting Flink's exact watermark arithmetic - asserting a precise
+    drop count would be asserting a model of Flink, not measuring it.
+    What this does catch is loss appearing anywhere it cannot be
+    explained, which is the V8 property that matters.
+    """
+    bound = 0
+    for scenario in scenarios:
+        if isinstance(scenario, UpstreamBackfillReplay):
+            replay_from = scenario.starts_at - scenario.backfill_age
+            replay_until = replay_from + scenario.backfill_span
+            bound += sum(1 for e in clean_events
+                         if replay_from <= e[PICKUP_COLUMN] < replay_until)
+        elif isinstance(scenario, OutOfOrderFlood):
+            bound += sum(1 for e in clean_events if scenario.covers(e[PICKUP_COLUMN]))
+    return bound
+
+
+def landed_row_total(conn, trailing_window_end):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COALESCE(SUM(row_count), 0) FROM weir_metrics.window_metrics "
+            "WHERE window_end <> %s",
+            (trailing_window_end,),
+        )
+        return float(cur.fetchone()[0])
+
+
+def populate(args, stream_path, expected_count, label, allow_late_drop=False):
     """Reuse scripts/verify_metrics_job.py as the single population
     path, rather than a second orchestration codepath to keep in sync.
     Its deep checks still run; only the emitted-count expectation is
@@ -290,6 +324,8 @@ def populate(args, stream_path, expected_count, label):
         "--expected-emitted-count", str(expected_count),
         "--preserve-input-order",
     ]
+    if allow_late_drop:
+        cmd.append("--allow-late-drop")
     print(f"\n--- populating [{label}] via verify_metrics_job.py ({expected_count} events) ---")
     result = subprocess.run(cmd, cwd=REPO_ROOT, timeout=args.populate_timeout)
     if result.returncode != 0:
@@ -657,7 +693,11 @@ def main():
         ):
             stream_path = REPO_ROOT / f"benchmarks/results/_stream_{label}.parquet"
             write_stream(events, stream_path)
-            populate(args, stream_path, expected, label)
+            # Only the injected stream deliberately contains events the
+            # pipeline is supposed to drop; the clean run keeps the exact
+            # zero-loss invariant, which is what makes it a usable FP
+            # denominator in the first place.
+            populate(args, stream_path, expected, label, allow_late_drop=(label == "injected"))
 
             reset_detector_state(conn)
             trailing = append_trailing_window(conn)
@@ -667,6 +707,7 @@ def main():
             phases[label] = {
                 "incidents": collect_incidents(conn),
                 "band_boundaries": band_boundary_window_ends(conn, trailing),
+                "landed_rows": landed_row_total(conn, trailing),
                 "scored_windows": sum(
                     c for _, status, c in scored_window_counts(conn) if status == "scored"
                 ),
@@ -693,6 +734,18 @@ def main():
             fail("no bucket reached min_observations in the clean replay, so no detector could "
                  "score anything. Detection rate and FP rate would both be structurally zero "
                  "and would mean nothing - replay a longer span.")
+
+        # V8: the injected run legitimately loses data (ancient backfill
+        # copies, the out-of-order tail), but that loss has to be
+        # attributable to a scenario that declares it - not merely
+        # tolerated because injection was involved.
+        injected_shortfall = predicted - injected["landed_rows"]
+        loss_bound = max_explainable_loss(scenarios, clean_events)
+        print(f"injected replay lost {injected_shortfall:.0f} of {predicted} events; "
+              f"at most {loss_bound} are explainable by the scenarios that declare data loss")
+        if injected_shortfall > loss_bound:
+            fail(f"injected replay lost {injected_shortfall:.0f} events but only {loss_bound} "
+                 f"are attributable to scenarios declaring loss - the rest is unexplained")
 
         scenario_results, unattributed = attribute(scenarios, injected["incidents"], slice_end)
         summary = summarise(
