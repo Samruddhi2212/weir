@@ -34,7 +34,20 @@ def _json_default(value):
     return str(value)
 
 
-def load_sorted_trips(parquet_path):
+def load_sorted_trips(parquet_path, preserve_input_order=False):
+    """Sorted by pickup time with a fresh stable _row_index, unless
+    preserve_input_order is set.
+
+    preserve_input_order exists for the benchmark runner
+    (benchmarks/run_benchmark.py): its scenarios express failures as
+    transforms on the event stream, and two of them - an out-of-order
+    flood and a duplicate storm - are defined by send order and by
+    repeated keys. Re-sorting and re-indexing such a stream silently
+    erases exactly what it was injecting, turning a scenario into a
+    no-op that the benchmark would then score as a detector miss. With
+    the flag, the file's physical row order IS the send order and an
+    existing _row_index column is used as-is.
+    """
     table = pq.read_table(parquet_path)
     if PICKUP_COLUMN not in table.column_names:
         raise SystemExit(
@@ -48,8 +61,16 @@ def load_sorted_trips(parquet_path):
     # pq.read_table() on the same file always reads rows in the same
     # on-disk physical order - stable sort of a deterministic input
     # order is deterministic output order, ties included.
-    table = table.sort_by(PICKUP_COLUMN)
+    if not preserve_input_order:
+        table = table.sort_by(PICKUP_COLUMN)
     rows = table.to_pylist()
+    if preserve_input_order:
+        if any("_row_index" not in row for row in rows):
+            raise SystemExit(
+                f"FAIL: {parquet_path} is missing a _row_index column, which "
+                f"--preserve-input-order requires - the caller owns key identity in that mode."
+            )
+        return rows
     # Assigned here, against the full sorted sequence, before any
     # --limit slicing or --resume-after-timestamp filtering happens -
     # both of those produce a *subset* of rows, and deriving the trip
@@ -203,6 +224,13 @@ def main():
                          help="cap on wall-clock sleep between sends, seconds (default: 5)")
     parser.add_argument("--limit", type=int, default=0, help="replay only the first N trips (0 = all, default)")
     parser.add_argument(
+        "--preserve-input-order", action="store_true",
+        help="treat the file's physical row order as the send order and reuse its existing "
+             "_row_index column, instead of sorting by pickup time and re-indexing. For "
+             "pre-built streams whose order and repeated keys ARE the payload "
+             "(benchmarks/run_benchmark.py's injected scenarios).",
+    )
+    parser.add_argument(
         "--emission-log", default=None,
         help="optional path to write JSON-lines confirmed-delivery log (trip_key, event_ts, partition, offset)",
     )
@@ -229,8 +257,9 @@ def main():
     args = parser.parse_args()
 
     print(f"replay_producer.py: loading {args.input}", file=sys.stderr)
-    rows = load_sorted_trips(args.input)
-    print(f"replay_producer.py: {len(rows)} trips loaded, sorted by {PICKUP_COLUMN}", file=sys.stderr)
+    rows = load_sorted_trips(args.input, preserve_input_order=args.preserve_input_order)
+    ordering = "input order preserved" if args.preserve_input_order else f"sorted by {PICKUP_COLUMN}"
+    print(f"replay_producer.py: {len(rows)} trips loaded, {ordering}", file=sys.stderr)
 
     if args.resume_after_timestamp:
         resume_ts = datetime.datetime.fromisoformat(args.resume_after_timestamp)
