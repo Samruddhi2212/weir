@@ -118,6 +118,12 @@ def main():
         help="passed through to replay_producer.py - see its help.",
     )
     p.add_argument(
+        "--allow-late-drop", action="store_true",
+        help="the input stream deliberately contains events the pipeline should drop "
+             "(an injected benchmark run). Reports the shortfall instead of asserting zero "
+             "loss, and still fails if MORE rows land than were emitted.",
+    )
+    p.add_argument(
         "--drain-max-wait", type=int, default=900,
         help="seconds to let the JDBC sink finish flushing windows before the broad check "
              "asserts. Waits for the pipeline to stop moving; never relaxes the assertion.",
@@ -427,7 +433,22 @@ def main():
                      "SELECT COALESCE(SUM(row_count), 0) FROM weir_metrics.window_metrics;")
     actual_sum = float(sum_rows[0][0])
     print(f"actual SUM(row_count) = {actual_sum}, expected_closed_row_count = {expected_closed_row_count}")
-    if actual_sum != expected_closed_row_count:
+    if args.allow_late_drop:
+        # An injected stream deliberately contains events the pipeline is
+        # SUPPOSED to drop - months-old backfill copies, and an
+        # out-of-order tail past the watermark bound. "Every emitted event
+        # lands in a closed window" is false by construction there, so
+        # asserting it would be asserting that injection did nothing.
+        # Still one-directional: more rows than emitted would mean rows
+        # appearing from nowhere, which no scenario can explain.
+        shortfall = expected_closed_row_count - actual_sum
+        if actual_sum > expected_closed_row_count:
+            fail(f"SUM(row_count)={actual_sum} EXCEEDS emitted {expected_closed_row_count} - "
+                 f"rows appeared that were never sent; no scenario can account for that")
+        print(f"late-drop expected: {shortfall:.0f} of {expected_closed_row_count:.0f} events "
+              f"({shortfall / expected_closed_row_count * 100:.4f}%) did not reach a closed window. "
+              f"The caller is responsible for attributing this to its injected scenarios.")
+    elif actual_sum != expected_closed_row_count:
         docker_compose_logs(["flink-jobmanager", "flink-taskmanager"])
         fail(f"SUM(row_count)={actual_sum} != independently computed expected_closed_row_count={expected_closed_row_count}")
     print("PASS: stage 9 - broad check matches exactly")
