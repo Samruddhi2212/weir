@@ -46,8 +46,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install pytest
-        run: pip install pytest
+      - name: Install pytest and the suite's own imports
+        # pyarrow: tests/integration/test_load_pickup_timestamps.py
+        # imports it at module scope, so a missing pyarrow is a
+        # collection ERROR, not the graceful skip its skipif intends.
+        run: pip install pytest pyarrow
       - name: Start stack
         run: docker compose up -d --build
       - name: Capture Flink lib/ jar manifest
