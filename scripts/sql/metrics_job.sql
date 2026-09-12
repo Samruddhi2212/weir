@@ -242,7 +242,13 @@ SELECT
   AVG(`cbd_congestion_fee`) AS cbd_congestion_fee_mean,
   MIN(`passenger_count`) AS passenger_count_min,
   MAX(`passenger_count`) AS passenger_count_max,
-  AVG(`passenger_count`) AS passenger_count_mean,
+  -- CAST before AVG, not after: passenger_count is BIGINT (the only
+  -- integer column in this SELECT's means), and Flink's AVG over an
+  -- integer type returns that integer type, truncating. That shipped a
+  -- silently wrong mean - 154/107 stored as 1.0, 13/6 stored as 2.0 -
+  -- while MIN/MAX on the same column stayed correct because they never
+  -- divide. Every other *_mean here is already DOUBLE.
+  AVG(CAST(`passenger_count` AS DOUBLE)) AS passenger_count_mean,
   SUM(CASE WHEN `tpep_dropoff_datetime` < `tpep_pickup_datetime` THEN 1 ELSE 0 END) AS trip_duration_negative_count,
   SUM(CASE WHEN `tpep_dropoff_datetime` = `tpep_pickup_datetime` THEN 1 ELSE 0 END) AS trip_duration_zero_count
 FROM TABLE(

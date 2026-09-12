@@ -110,7 +110,8 @@ directories or files exist for these.
   `metrics_job.sql`, both already shipped and 5/5-verified (Part 2.1/3.1),
   which is a bigger, separate decision than this detector's own scope.
 
-- **`metrics_job.sql`'s `AVG(passenger_count)` produced a wrong value
+- **RESOLVED (root cause found, fixed): `metrics_job.sql`'s
+  `AVG(passenger_count)` produced a wrong value
   against a real November 2024 window** - confirmed directly against
   the source parquet: 132 real rows, 25 null, non-null values 1-5,
   true mean 1.439; Postgres reported 1.0. `MIN`/`MAX` for the same
@@ -118,9 +119,17 @@ directories or files exist for these.
   and every null_count matched - so this isn't corrupted source values
   or a window-boundary mismatch, something in the `AVG` computation
   itself. Never surfaced before because CI had only ever exercised this
-  job's Stage 8 deep-check against 2025-01. Not root-caused - would need
-  Flink checkpoint/aggregation-internals digging beyond what
-  `volume-detector-verify.yml` needs (it only reads `row_count`).
+  job's Stage 8 deep-check against 2025-01. **Root cause, found when the
+  benchmark hit it a second time with different numbers: integer
+  division.** `passenger_count` is declared `BIGINT` and Flink's `AVG`
+  over an integer type returns that integer type, truncating - 154/107
+  stored as 1.0, and 13/6 stored as 2.0 in the second occurrence. It is
+  the only integer column among the means, which is why every other
+  `*_mean` was correct, and why `MIN`/`MAX` on this same column were
+  correct throughout: they never divide. Fixed by casting to DOUBLE
+  before the aggregate. No detector consumed this value (volume reads
+  `row_count`, freshness `window_end`, null-rate `null_count`), so no
+  published detector number was affected by it.
 
 - **Event-delay drift detection** - a detector scoring `lateness_p50/
   p99/max_seconds` (actual event-time delay distribution, distinct from
