@@ -46,6 +46,7 @@ from pathlib import Path
 
 import psycopg
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -72,6 +73,29 @@ from reliability.volume.run import to_naive_local, to_utc_instant
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_DIR = REPO_ROOT / "benchmarks" / "results"
 NULLRATE_COLUMN = "passenger_count"
+
+# (weekday, hour) bands, weekday 0=Mon. Warming one bucket needs
+# min_observations (480) one-minute windows in that bucket, i.e. ~8
+# weekly occurrences of its hour - so a contiguous short slice can warm
+# nothing, while a band replayed across months warms that bucket cheaply.
+#
+# Several bands, not one: a detection or false-positive rate computed
+# over a single (weekday, hour) is a rate over one baseline, not a
+# denominator worth publishing. These four span genuinely different
+# traffic regimes, so the FP rate reflects varied baseline conditions -
+# dense rush hour, near-empty overnight, and weekend daytime behave
+# nothing alike in this dataset (DEFENSE.md #38/#40).
+DEFAULT_BANDS = (
+    (0, 8),    # Monday 08:00 - weekday morning rush
+    (4, 18),   # Friday 18:00 - weekday evening peak
+    (2, 3),    # Wednesday 03:00 - weekday overnight lull
+    (5, 13),   # Saturday 13:00 - weekend daytime
+)
+# A gap wider than this between consecutive real windows marks the start
+# of a new band occurrence rather than a real arrival gap - an artifact
+# of band filtering, reported separately rather than silently counted as
+# detector noise.
+BAND_BOUNDARY_GAP_SECONDS = 120
 # Past the real data by more than max_lag_seconds so the lag buffer
 # clears every real window without assume_no_more_arrivals.
 TRAILING_WINDOW_OFFSET = datetime.timedelta(seconds=900)
@@ -96,6 +120,58 @@ def connect(args):
 # --------------------------------------------------------------------
 # Ground truth: scenarios placed against the real slice, before any run
 # --------------------------------------------------------------------
+
+def load_band_filtered(paths, bands):
+    """Load only the events falling in the chosen (weekday, hour) bands.
+
+    Filtered per file with pyarrow before materialising to Python, not
+    after: the four months are millions of rows and a full to_pylist()
+    would be gigabytes of dicts, while the bands are a low-single-digit
+    percentage of them.
+
+    Schemas differ across months - cbd_congestion_fee only exists from
+    2025-01 (DEFENSE.md #49) - so concat promotes, filling the older
+    months' missing column with nulls rather than refusing to combine.
+    _row_index is assigned once, after the combined sort, so keys are
+    unique and stable across the whole replayed stream.
+    """
+    filtered = []
+    for path in paths:
+        table = pq.read_table(path)
+        if PICKUP_COLUMN not in table.column_names:
+            fail(f"{path} has no {PICKUP_COLUMN} column")
+        column = table.column(PICKUP_COLUMN)
+        weekday = pc.day_of_week(column, count_from_zero=True, week_start=1)
+        hour = pc.hour(column)
+        mask = None
+        for band_weekday, band_hour in bands:
+            in_band = pc.and_(pc.equal(weekday, band_weekday), pc.equal(hour, band_hour))
+            mask = in_band if mask is None else pc.or_(mask, in_band)
+        kept = table.filter(mask)
+        print(f"  {Path(path).name}: {kept.num_rows} of {table.num_rows} rows in band")
+        filtered.append(kept)
+
+    combined = pa.concat_tables(filtered, promote_options="default").sort_by(PICKUP_COLUMN)
+    rows = combined.to_pylist()
+    for index, row in enumerate(rows):
+        row["_row_index"] = index
+    return rows
+
+
+def parse_bands(raw):
+    if not raw:
+        return list(DEFAULT_BANDS)
+    bands = []
+    for item in raw:
+        try:
+            weekday, hour = (int(part) for part in item.split(":"))
+        except ValueError:
+            fail(f"--band expects weekday:hour (0=Mon), got {item!r}")
+        if not (0 <= weekday <= 6 and 0 <= hour <= 23):
+            fail(f"--band out of range: {item!r}")
+        bands.append((weekday, hour))
+    return bands
+
 
 def build_scenarios(events, warmup_fraction):
     """Place every catalog scenario in the injection portion of the
@@ -266,6 +342,31 @@ def warmed_bucket_count(conn):
         return cur.fetchone()[0]
 
 
+def band_boundary_window_ends(conn, trailing_window_end):
+    """window_end values that begin a new band occurrence.
+
+    Band filtering leaves a gap of days between one band occurrence and
+    the next, and the freshness detector reads exactly those gaps. Those
+    are an artifact of how this benchmark samples the data, not a real
+    arrival failure - measured and reported separately so a reader can
+    tell experiment design apart from detector noise. Not excluded: the
+    incidents still count, they're just also broken out.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT window_end FROM weir_metrics.window_metrics "
+            "WHERE window_end <> %s ORDER BY window_end ASC",
+            (trailing_window_end,),
+        )
+        ends = [r[0] for r in cur.fetchall()]
+
+    boundaries = set()
+    for previous, current in zip(ends, ends[1:]):
+        if (current - previous).total_seconds() > BAND_BOUNDARY_GAP_SECONDS:
+            boundaries.add(to_utc_instant(current, VOLUME_CONFIG.timezone))
+    return boundaries
+
+
 def clean_event_time_hours(conn, trailing_window_end):
     with conn.cursor() as cur:
         cur.execute(
@@ -359,7 +460,8 @@ def percentile(values, fraction):
     return ordered[rank - 1]
 
 
-def summarise(scenario_results, clean_incidents, clean_scored, clean_hours, unattributed):
+def summarise(scenario_results, clean_incidents, clean_scored, clean_hours, unattributed,
+              warmed_buckets=None, bands=None, boundary_window_ends=frozenset()):
     detected = [r for r in scenario_results if r["detected"]]
     targeted = [r for r in scenario_results if r["expected_detector"] is not None]
     targeted_detected = [r for r in targeted if r["detected"]]
@@ -375,7 +477,13 @@ def summarise(scenario_results, clean_incidents, clean_scored, clean_hours, unat
              "denominator. That is an unwarmed baseline, not a 0% false-positive rate - "
              "replay a span long enough to warm at least one bucket.")
 
+    at_boundary = [i for i in clean_incidents if i["window_end"] in boundary_window_ends]
+
     return {
+        "warmed_buckets": warmed_buckets,
+        "bands": [f"{weekday}:{hour}" for weekday, hour in (bands or [])],
+        "band_count": len(bands or []),
+        "false_positives_at_band_boundaries": len(at_boundary),
         "scenarios_total": len(scenario_results),
         "scenarios_detected": len(detected),
         "detection_rate": len(detected) / len(scenario_results),
@@ -429,7 +537,11 @@ def render_markdown(scenario_results, summary):
         f"- detection latency: median {secs(summary['detection_latency_median_seconds'])}, "
         f"p95 {secs(summary['detection_latency_p95_seconds'])} (event time, nearest-rank)",
         f"- scenarios: {summary['scenarios_total']}",
+        f"- warmed buckets: {summary['warmed_buckets']} across {summary['band_count']} "
+        f"(weekday:hour) bands {', '.join(summary['bands'])}",
         f"- clean event-time hours covered: {summary['clean_event_time_hours']:.2f}",
+        f"- of those false positives, at a band boundary (an artifact of band sampling, "
+        f"not a real arrival gap): {summary['false_positives_at_band_boundaries']}",
         f"- unattributed incidents in the injected replay: "
         f"{summary['unattributed_injected_incidents']}",
     ]
@@ -454,7 +566,12 @@ def write_results(payload):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", required=True, help="real TLC parquet to replay")
+    parser.add_argument("--input", required=True, nargs="+",
+                        help="real TLC parquet file(s) to replay - several months, since warming "
+                             "one bucket needs ~8 weekly occurrences of its hour")
+    parser.add_argument("--band", action="append", default=None,
+                        help="weekday:hour band to replay (0=Mon), repeatable. Defaults to four "
+                             "bands spanning different traffic regimes.")
     parser.add_argument("--bootstrap-server", required=True)
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=5432)
@@ -470,12 +587,13 @@ def main():
     parser.add_argument("--populate-timeout", type=int, default=3600)
     args = parser.parse_args()
 
-    print("=== Stage 1: load the real slice ===")
-    clean_events = load_sorted_trips(args.input)
+    bands = parse_bands(args.band)
+    print(f"=== Stage 1: load the real slice, bands {bands} ===")
+    clean_events = load_band_filtered(args.input, bands)
     if args.limit:
         clean_events = clean_events[:args.limit]
     if not clean_events:
-        fail(f"no events loaded from {args.input}")
+        fail(f"no events matched bands {bands} in {args.input}")
     slice_start = clean_events[0][PICKUP_COLUMN]
     slice_end = clean_events[-1][PICKUP_COLUMN]
     print(f"{len(clean_events)} real trips, event time {slice_start} .. {slice_end}")
@@ -511,6 +629,7 @@ def main():
 
             phases[label] = {
                 "incidents": collect_incidents(conn),
+                "band_boundaries": band_boundary_window_ends(conn, trailing),
                 "scored_windows": sum(
                     c for _, status, c in scored_window_counts(conn) if status == "scored"
                 ),
@@ -534,6 +653,8 @@ def main():
         summary = summarise(
             scenario_results, clean["incidents"], clean["scored_windows"],
             clean["event_time_hours"], unattributed,
+            warmed_buckets=clean["warmed_buckets"], bands=bands,
+            boundary_window_ends=clean["band_boundaries"],
         )
 
     report = render_markdown(scenario_results, summary)
@@ -547,8 +668,8 @@ def main():
         "composition_order": [s.name for s in scenarios],
         "summary": summary,
         "scenarios": scenario_results,
-        "clean_phase": {k: v for k, v in clean.items() if k != "incidents"},
-        "injected_phase": {k: v for k, v in injected.items() if k != "incidents"},
+        "clean_phase": {k: v for k, v in clean.items() if k not in ("incidents", "band_boundaries")},
+        "injected_phase": {k: v for k, v in injected.items() if k not in ("incidents", "band_boundaries")},
         "false_positive_incidents": clean["incidents"],
         "unattributed_injected_incidents": unattributed,
     })
