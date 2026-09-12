@@ -3332,3 +3332,25 @@ constraint/query pattern working unchanged. Rejected: a real
 column_name column on every table - more general in the abstract, but
 no other detector needs it, and CLAUDE.md's own C2 argues against
 carrying a dimension nothing uses yet.
+
+## 54. Benchmark scenarios inject into the replayed event stream, not into Postgres
+
+Decision: every scenario in incidents/benchmark/ is a transform on the
+event list replay_producer.py sends to Kafka, so an injected failure
+travels the real path (Kafka -> Flink -> weir_metrics -> detector).
+Rejected: reuse incidents/dev/'s direct-write shape, which is far
+simpler and already exists. It would make the headline number a
+measurement of how fast a detector polls a table someone just wrote to,
+not how long a failure takes to surface through the pipeline - detection
+latency would be real arithmetic over a meaningless interval. This is
+what hard rule 2's benchmarks/-never-imports-incidents/dev/ boundary is
+actually protecting, so the rule now has a test that fails both on a
+real import and on naming the path in a string.
+
+Consequence worth stating: scenarios can only express what a stream
+transform can express - drop, duplicate, reorder, mutate. A monotonic
+delay ramp turned out to express nothing (t + delay(t) is strictly
+increasing, so sorting by it returns the input order), so GradualDelay
+models the observable consequence instead - late events dropped once
+the ramp crosses the 270s watermark bound. That is the honest version:
+under the bound the pipeline genuinely does absorb delay invisibly.
