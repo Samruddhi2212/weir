@@ -106,6 +106,17 @@ def main():
     p.add_argument("--bootstrap-server", required=True)
     p.add_argument("--topic", default="weir-metrics-verify")
     p.add_argument("--limit", type=int, default=6000)
+    p.add_argument(
+        "--expected-emitted-count", type=int, default=None,
+        help="broker-confirmed delivery count to assert, when it isn't --limit. The benchmark "
+             "runner supplies a count derived independently from its scenarios' declared "
+             "effects (a duplicate storm adds rows, a partition degradation removes them), so "
+             "the invariant stays exact rather than being relaxed for injected runs.",
+    )
+    p.add_argument(
+        "--preserve-input-order", action="store_true",
+        help="passed through to replay_producer.py - see its help.",
+    )
     p.add_argument("--resume-after-timestamp", default=None,
                    help="passed through to replay_producer.py - seek near a specific date "
                         "(e.g. a real DST transition) instead of always starting at the file's "
@@ -161,6 +172,8 @@ def main():
     ]
     if args.resume_after_timestamp:
         replay_cmd += ["--resume-after-timestamp", args.resume_after_timestamp]
+    if args.preserve_input_order:
+        replay_cmd.append("--preserve-input-order")
     replay = run(replay_cmd, timeout=300)
     print_raw("replay_producer.py", replay.stdout + replay.stderr)
     if replay.returncode != 0:
@@ -172,9 +185,12 @@ def main():
             line = line.strip()
             if line:
                 emitted.append(json.loads(line))
-    if len(emitted) != args.limit:
-        fail(f"emission log has {len(emitted)} entries, expected exactly {args.limit} (broker-confirmed count)")
-    print(f"PASS: stage 3 - {len(emitted)} broker-confirmed deliveries, matches --limit exactly")
+    expected_emitted = args.expected_emitted_count if args.expected_emitted_count is not None else args.limit
+    source = "--expected-emitted-count" if args.expected_emitted_count is not None else "--limit"
+    if len(emitted) != expected_emitted:
+        fail(f"emission log has {len(emitted)} entries, expected exactly {expected_emitted} "
+             f"(broker-confirmed count, from {source})")
+    print(f"PASS: stage 3 - {len(emitted)} broker-confirmed deliveries, matches {source} exactly")
 
     event_timestamps = sorted(datetime.datetime.fromisoformat(e["event_ts"]) for e in emitted)
     last_event_ts = event_timestamps[-1]
