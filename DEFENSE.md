@@ -8,6 +8,15 @@ memory, without re-deriving it.
 that decision doesn't get committed. An unwritten entry means the tradeoff
 hasn't actually been thought through yet.
 
+**Numbering:** entry numbers are stable identifiers, not an index - the
+jump from #1 to #9 is deliberate. #2-#8 were headings drafted early and
+never written; seven empty sections read worse than a shorter complete
+document, so they were removed rather than left as placeholders for
+topics that found their real homes elsewhere (the watermark derivation in
+#40, exactly-once in #27/#37, baseline strategy in #44, benchmark-vs-dev
+in #54). Renumbering to close the gap would invalidate every reference to
+#9-#54 across the repo and is never worth it.
+
 ## 1. Detector read path and detection latency floor
 
 Detectors read from the live Kafka stream and from Postgres, not from
@@ -38,20 +47,6 @@ against a latency requirement that doesn't exist yet, and (c) the interval
 is read from an env var specifically so the (also deferred) sensitivity
 sweep can explore this tradeoff empirically later, instead of us guessing a
 number now.
-
-## 2. Watermark bound derivation
-
-## 3. Exactly-once across TaskManager failure
-
-## 4. Baseline strategy and its systematic blind spot
-
-## 5. Benchmark scenarios vs dev triggers
-
-## 6. Declared lineage in v1, and what runtime emission requires
-
-## 7. False-positive tolerance and operating point
-
-## 8. What the benchmark missed and why
 
 ## 9. Benchmark-metrics guard: narrow negative check + positive sync check
 
