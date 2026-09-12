@@ -676,6 +676,14 @@ def main():
                 "statuses": {k: len(v) for k, v in statuses.items()},
             }
             stream_path.unlink(missing_ok=True)
+            # Release this phase's read locks before the next phase's
+            # population runs. These reads are autocommit=False, so they
+            # leave the session idle in transaction holding ACCESS SHARE
+            # on window_metrics - which blocks the next phase's TRUNCATE
+            # (ACCESS EXCLUSIVE) until it times out. Everything above is
+            # already materialised into Python, and every write already
+            # committed, so there is nothing here to lose.
+            conn.rollback()
 
         clean, injected = phases["clean"], phases["injected"]
         print(f"\nclean: {clean['warmed_buckets']} warmed buckets, "
