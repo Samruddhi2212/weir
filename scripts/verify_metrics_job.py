@@ -117,6 +117,11 @@ def main():
         "--preserve-input-order", action="store_true",
         help="passed through to replay_producer.py - see its help.",
     )
+    p.add_argument(
+        "--drain-max-wait", type=int, default=900,
+        help="seconds to let the JDBC sink finish flushing windows before the broad check "
+             "asserts. Waits for the pipeline to stop moving; never relaxes the assertion.",
+    )
     p.add_argument("--resume-after-timestamp", default=None,
                    help="passed through to replay_producer.py - seek near a specific date "
                         "(e.g. a real DST transition) instead of always starting at the file's "
@@ -397,6 +402,27 @@ def main():
     print(f"PASS: stage 8 - all {expected_metric_count} metrics + row_count exactly match independently computed ground truth")
 
     print("\n=== Stage 9: broad check - SUM(row_count) across all closed windows ===")
+    # Wait for the sink to drain before asserting, rather than relaxing
+    # what is asserted. Stage 7 only waits for ONE window to land; with
+    # a small replay everything else has landed by now, but a large one
+    # (the benchmark replays ~385k events across four months) is still
+    # flushing windows through the JDBC sink's checkpoint cadence when
+    # this stage is reached - a race that reads as a huge shortfall.
+    # The invariant below is unchanged and still exact; it just runs
+    # once the pipeline has actually stopped moving.
+    previous_sum, stable_polls, waited = None, 0, 0
+    while waited < args.drain_max_wait:
+        sum_rows = psql(args.pg_container, args.pg_user, args.pg_db,
+                        "SELECT COALESCE(SUM(row_count), 0) FROM weir_metrics.window_metrics;")
+        current_sum = float(sum_rows[0][0])
+        stable_polls = stable_polls + 1 if current_sum == previous_sum else 0
+        if current_sum == expected_closed_row_count or stable_polls >= 3:
+            break
+        previous_sum = current_sum
+        waited += 5
+        time.sleep(5)
+    print(f"drained after ~{waited}s (SUM stable for {stable_polls} consecutive polls)")
+
     sum_rows = psql(args.pg_container, args.pg_user, args.pg_db,
                      "SELECT COALESCE(SUM(row_count), 0) FROM weir_metrics.window_metrics;")
     actual_sum = float(sum_rows[0][0])
