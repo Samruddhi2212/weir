@@ -197,13 +197,49 @@ def build_scenarios(events, warmup_fraction):
                       start_rate=0.01, end_rate=0.60),
         DuplicateEventStorm(at(0.46), at(0.56), copies=3),
         OutOfOrderFlood(at(0.58), at(0.70)),
+        # backfill_age reaches back past injection_start into the warmup
+        # region on purpose. Replaying genuinely old, already-processed
+        # data is the realistic shape of this failure, and it keeps the
+        # source window clear of every injected span - an earlier
+        # 0.5*injection_span landed inside GradualDelay's window, so the
+        # events it meant to replay had already been dropped by the time
+        # it ran (caught by the declared-effect prediction, not by
+        # reading the code).
         UpstreamBackfillReplay(
             at(0.72),
-            backfill_age=injection_span * 0.5,
+            backfill_age=injection_span * 0.9,
             backfill_span=injection_span * 0.06,
         ),
         SlowVolumeDecline(at(0.80), last, weekly_decline_fraction=0.05),
     ]
+
+
+def assert_spans_disjoint(scenarios):
+    """No two scenarios may overlap in event time.
+
+    Two reasons, and the second is the one that survives any change to
+    how counts are predicted: overlapping spans make the independent
+    expected-count prediction inexact (a dropping scenario changes what
+    a later one sees), and they make attribution ambiguous - an incident
+    inside an overlap could belong to either scenario, so there would be
+    no honest way to score it.
+    """
+    spans = []
+    for scenario in scenarios:
+        spans.append((scenario.name, scenario.starts_at, scenario.ends_at))
+        if isinstance(scenario, UpstreamBackfillReplay):
+            source_start = scenario.starts_at - scenario.backfill_age
+            spans.append((f"{scenario.name}(source)", source_start,
+                          source_start + scenario.backfill_span))
+
+    overlaps = []
+    for i, (name_a, start_a, end_a) in enumerate(spans):
+        for name_b, start_b, end_b in spans[i + 1:]:
+            if start_a < (end_b or start_b) and start_b < (end_a or start_a):
+                overlaps.append(f"{name_a} overlaps {name_b}")
+    if overlaps:
+        fail("benchmark scenario spans overlap, which makes attribution ambiguous: "
+             + "; ".join(overlaps))
 
 
 def predict_emitted_count(scenarios, clean_events):
@@ -600,6 +636,7 @@ def main():
 
     print("\n=== Stage 2: fix ground truth before either replay (V7) ===")
     scenarios = build_scenarios(clean_events, args.warmup_fraction)
+    assert_spans_disjoint(scenarios)
     for scenario in scenarios:
         print(f"  {scenario.name}: {scenario.starts_at} .. {scenario.ends_at} "
               f"-> expects {scenario.expected_detector or 'MISS (no detector targets it)'}")
