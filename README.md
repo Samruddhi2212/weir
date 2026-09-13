@@ -7,10 +7,14 @@ incidents.
 and detection latency against injected failures, benchmarked against a
 reproducible failure catalog. No comparable OSS project does this.
 
-No performance numbers are published in this README, and none will be added
-speculatively. Detection rate, false-positive rate, and detection latency
-appear here only after `benchmarks/run_benchmark.py` has actually been run —
-see CLAUDE.md rule 1.
+That claim is scoped, and the scoping matters — see
+[docs/prior-art.md](docs/prior-art.md) for what it does and doesn't assert
+about the tools it's compared against.
+
+Every number below was produced by running `benchmarks/run_benchmark.py`
+against real NYC TLC data; none is estimated, and the block is generated
+from a result file rather than typed (CLAUDE.md rule 1). The limitations
+under it are part of the result, not caveats bolted on afterwards.
 
 ## Benchmark results
 
@@ -19,8 +23,97 @@ newest file in `benchmarks/results/*.json` — never edited by hand. CI fails
 if this block doesn't match a fresh regeneration.
 
 <!-- BENCHMARK:BEGIN -->
-No benchmark run yet.
+Run: `20260913T011848Z.json` (2026-09-13T01:18:48.259626+00:00)
+
+| Scenario | Detected | Latency (event time) |
+|---|---|---|
+| volume_partition_degradation | yes | 36235s |
+| freshness_gradual_delay | no | n/a |
+| nullrate_slow_creep | no | n/a |
+| duplicate_event_storm | no (expected miss) | n/a |
+| out_of_order_flood | no (expected miss) | n/a |
+| upstream_backfill_replay | no (expected miss) | n/a |
+| slow_volume_decline | no (expected miss) | n/a |
+
+| Measure | Value |
+|---|---|
+| Scenarios flagged, all (incl. expected misses) | 1/7 (14.2857%) |
+| Scenarios flagged, targeted only | 1/3 (33.3333%) |
+| Spurious incidents per scored window, clean replay | 126/6582 (1.9143%) |
+| Of those, at a band boundary (sampling artifact) | 11 |
+| Median / p95 time to flag (event time) | 36235s / 36235s |
+| Warmed buckets across 4 bands | 12 |
+| Clean event-time hours covered | 2919.92 |
+| Unattributed incidents, injected replay | 180 |
+
+Across 5 runs of the same input and code:
+
+| Measure | Across runs |
+|---|---|
+| Scenarios flagged, all | 1/7 in all 5 |
+| Scenarios flagged, targeted only | 1/3 in all 5 |
+| Spurious incidents per scored window | 126/6582 in all 5 |
+| Warmed buckets | 12 in all 5 |
+| Median time to flag (event time) | 36235 .. 345715, 9.5x |
+| Unattributed incidents, injected replay | 180 .. 283, 1.6x |
 <!-- BENCHMARK:END -->
+
+### How to read the table above
+
+These are measured, not estimated, and they are reported whole — including
+the scenarios this system does not catch. Four of the seven are declared
+**expected misses**: nothing in Weir targets duplicate delivery, event
+reordering, upstream backfill, or a decline slow enough for the baseline
+to follow it. They sit in the denominator on purpose. A detection figure
+computed only over failures the detectors were built for would not mean
+anything.
+
+Four limitations, each of which changes how a line above should be read:
+
+1. **What's reproducible and what isn't, across 5 runs of identical input
+   and code.** Which scenarios get flagged, the spurious-incident count
+   (identical down to the individual incident), warmed buckets and covered
+   hours were the same in all five. Time to flag was not: it is *bimodal*,
+   landing on one of exactly two values 9.5x apart, never in between. The
+   cause is late arrival — three runs lost ~19,270 events to the watermark
+   and two lost none, from the same input, because whether a late record
+   beats the watermark is a race between replay pacing and Flink's
+   progress. That single difference drives the entire spread.
+2. **The freshness row is not a valid measurement of the freshness
+   detector.** To warm an 8-week baseline affordably, the benchmark
+   replays four `(weekday, hour)` bands rather than continuous time. That
+   leaves ~42-hour gaps between band occurrences, and the freshness
+   detector's entire signal *is* the gap between windows — so its baseline
+   learns that 42-hour gaps are normal, and a real multi-minute gap is
+   invisible against it. Its miss here is an artifact of how the data was
+   sampled, not evidence about the detector.
+3. **The faster time-to-flag is an artifact, and the slower one is the
+   honest figure.** The two modes are not noise around a true value. In
+   the runs that lost events to late arrival, the loss *itself* produced a
+   volume anomaly inside the scenario's window — fewer rows than the
+   baseline expects looks the same whether a partition degraded or the
+   watermark dropped records. Those runs flag earlier for a reason that
+   has nothing to do with the injected failure. The runs that lost nothing
+   flag on the partition degradation alone, at the larger value, and that
+   is the figure to read as this scenario's actual time to flag. Both are
+   also quantised to band occurrences (detection can only land in a
+   sampled hour), so both are shaped by sampling on top of that.
+4. **The spurious-incident figure mixes two different things.** Of the
+   126, nine are the band-boundary artifact described above; the other 117
+   are the volume detector firing on genuine traffic variation in real
+   data. Only the latter is a statement about detector quality.
+
+The honest summary: one targeted failure was caught, one was missed for a
+reason we can explain (below), and one could not be measured at all under
+this sampling. Nothing was tuned to produce these numbers — CLAUDE.md
+hard rule 3 forbids it, and no detector was modified after seeing them.
+
+**Why `nullrate_slow_creep` was missed** — candidate explanation, not a
+confirmed one: `passenger_count`'s real null rate in this dataset is both
+high and variable (one inspected window ran 25 nulls in 132 rows), so the
+bucket's tracked dispersion is wide, and a creep to 60% may simply not
+reach 3.5 sigma-equivalents against it. Confirming that needs the
+per-window baseline state, which this run didn't retain.
 
 **On the volume detector's false-positive rate specifically, once published:**
 read it as an upper bound, not a settled number. Its baseline uses 8 weekly
@@ -34,8 +127,25 @@ further.
 ## Status
 
 Sprint 1 is in progress. Infrastructure (Kafka, PostgreSQL, SeaweedFS,
-Flink, via Docker Compose) is scaffolded. The detection engine, lineage,
-and benchmark harness are not yet built.
+Flink, via Docker Compose) is up, a Flink job aggregates real NYC TLC
+trips into per-minute window metrics, and three detectors read those
+metrics from Postgres:
+
+| Detector | Signal | Verified against real data |
+|---|---|---|
+| volume | rows per window | yes |
+| freshness | arrival gap between windows | yes |
+| null-rate | nulls per column per window | yes |
+
+Each has a dev trigger in `incidents/dev/` for a fast local loop, and a
+dispatch-only CI workflow that runs it against a real month of TLC data.
+The benchmark harness (`benchmarks/run_benchmark.py`, with the failure
+catalog in `incidents/benchmark/`) is built and has produced the five runs
+reported above. [docs/demo.md](docs/demo.md) is a 60-second walkthrough of
+one detector firing, end to end.
+
+Lineage is still declared rather than runtime-emitted (below), and the
+triage agent, Terraform and dashboards remain out of scope.
 
 See [docs/FUTURE_WORK.md](docs/FUTURE_WORK.md) for what's explicitly out of
 Sprint 1 scope, and why.
