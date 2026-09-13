@@ -124,6 +124,11 @@ def main():
              "loss, and still fails if MORE rows land than were emitted.",
     )
     p.add_argument(
+        "--replay-timeout", type=int, default=300,
+        help="seconds allowed for replay_producer.py. 300 suits a 6k-event verification; the "
+             "benchmark replays millions and needs far more (measured ~2,800 events/s).",
+    )
+    p.add_argument(
         "--drain-max-wait", type=int, default=900,
         help="seconds to let the JDBC sink finish flushing windows before the broad check "
              "asserts. Waits for the pipeline to stop moving; never relaxes the assertion.",
@@ -185,26 +190,39 @@ def main():
         replay_cmd += ["--resume-after-timestamp", args.resume_after_timestamp]
     if args.preserve_input_order:
         replay_cmd.append("--preserve-input-order")
-    replay = run(replay_cmd, timeout=300)
+    replay = run(replay_cmd, timeout=args.replay_timeout)
     print_raw("replay_producer.py", replay.stdout + replay.stderr)
     if replay.returncode != 0:
         fail(f"replay_producer.py exited {replay.returncode} - broker did not confirm all sends (V5)")
 
-    emitted = []
+    # Streamed, not materialised: the benchmark replays ~10.5M events and
+    # a list of that many dicts (plus a sorted list of that many
+    # datetimes) is several GB - enough to get OOM-killed on a runner
+    # already hosting Kafka, Postgres and Flink. Two cheap passes over
+    # the file replace one expensive pass into memory; every assertion
+    # below is unchanged.
+    emitted_count = 0
+    first_event_ts = None
+    last_event_ts = None
     with open(emission_log, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if line:
-                emitted.append(json.loads(line))
+            if not line:
+                continue
+            event_ts = datetime.datetime.fromisoformat(json.loads(line)["event_ts"])
+            emitted_count += 1
+            if first_event_ts is None or event_ts < first_event_ts:
+                first_event_ts = event_ts
+            if last_event_ts is None or event_ts > last_event_ts:
+                last_event_ts = event_ts
+
     expected_emitted = args.expected_emitted_count if args.expected_emitted_count is not None else args.limit
     source = "--expected-emitted-count" if args.expected_emitted_count is not None else "--limit"
-    if len(emitted) != expected_emitted:
-        fail(f"emission log has {len(emitted)} entries, expected exactly {expected_emitted} "
+    if emitted_count != expected_emitted:
+        fail(f"emission log has {emitted_count} entries, expected exactly {expected_emitted} "
              f"(broker-confirmed count, from {source})")
-    print(f"PASS: stage 3 - {len(emitted)} broker-confirmed deliveries, matches {source} exactly")
+    print(f"PASS: stage 3 - {emitted_count} broker-confirmed deliveries, matches {source} exactly")
 
-    event_timestamps = sorted(datetime.datetime.fromisoformat(e["event_ts"]) for e in emitted)
-    last_event_ts = event_timestamps[-1]
     closed_boundary = last_event_ts - datetime.timedelta(seconds=args.watermark_bound_seconds)
     print(f"last_event_ts={last_event_ts.isoformat()} closed_boundary={closed_boundary.isoformat()}")
 
@@ -215,37 +233,58 @@ def main():
         we = ws + datetime.timedelta(minutes=1)
         return we <= closed_boundary
 
-    closed_ts = [ts for ts in event_timestamps if window_closed(window_start_of(ts))]
-    expected_closed_row_count = len(closed_ts)
+    # Deep-check window: the EARLIEST window, since with in-order replay
+    # it is certainly closed as long as any window is closed at all.
+    target_ws = window_start_of(first_event_ts)
+    target_we = target_ws + datetime.timedelta(minutes=1)
+
+    # Second pass: the closed-row count, and the delivered keys for the
+    # target window only - the full delivered-index set would be another
+    # 10.5M-entry structure, and only one window's worth is ever used.
+    expected_closed_row_count = 0
+    delivered_in_target = set()
+    with open(emission_log, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            event_ts = datetime.datetime.fromisoformat(entry["event_ts"])
+            if window_closed(window_start_of(event_ts)):
+                expected_closed_row_count += 1
+            if target_ws <= event_ts < target_we:
+                # trip_key format: tlc-yellow-{row_index:08d} (replay_producer.py)
+                delivered_in_target.add(int(entry["trip_key"].rsplit("-", 1)[-1]))
+
     if expected_closed_row_count == 0:
         fail("no windows are expected to close with these --limit/--watermark-bound-seconds settings - "
              "increase --limit or the event-time span so at least one full window closes")
     print(f"expected_closed_row_count (independently computed from emission log) = {expected_closed_row_count}")
-
-    # Deep-check window: the EARLIEST window, since with in-order replay
-    # it is certainly closed as long as any window is closed at all.
-    target_ws = window_start_of(event_timestamps[0])
-    target_we = target_ws + datetime.timedelta(minutes=1)
     if not window_closed(target_ws):
         fail("earliest window is not expected to be closed - dataset/limit too small for this check")
     print(f"deep-check target window: [{target_ws.isoformat()}, {target_we.isoformat()})")
 
     print("\n=== Stage 4: compute ground truth for the target window from the source parquet ===")
+    import pyarrow as pa
     import pyarrow.parquet as pq
     import pyarrow.compute as pc
 
-    delivered_indices = set()
-    for e in emitted:
-        # trip_key format: tlc-yellow-{row_index:08d} (replay_producer.py)
-        delivered_indices.add(int(e["trip_key"].rsplit("-", 1)[-1]))
-
     table = pq.read_table(args.input)
-    table = table.sort_by("tpep_pickup_datetime")
-    rows = table.to_pylist()
-    target_rows = [
-        r for i, r in enumerate(rows)
-        if i in delivered_indices and target_ws <= r["tpep_pickup_datetime"] < target_we
-    ]
+    # _row_index is already a column when the caller preserved input
+    # order; otherwise derive it from sorted position, as before. Either
+    # way the table is filtered to the one target window BEFORE being
+    # materialised - to_pylist() on the whole input is what the streaming
+    # above exists to avoid.
+    if "_row_index" not in table.column_names:
+        table = table.sort_by("tpep_pickup_datetime")
+        table = table.append_column("_row_index", pa.array(range(table.num_rows), type=pa.int64()))
+    pickup = table.column("tpep_pickup_datetime")
+    in_target = pc.and_(
+        pc.greater_equal(pickup, pa.scalar(target_ws)),
+        pc.less(pickup, pa.scalar(target_we)),
+    )
+    window_rows = table.filter(in_target).to_pylist()
+    target_rows = [r for r in window_rows if r["_row_index"] in delivered_in_target]
     n = len(target_rows)
     print(f"ground-truth row_count for target window = {n}")
 
