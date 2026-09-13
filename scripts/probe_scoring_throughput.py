@@ -34,6 +34,9 @@ SEED_ANCHOR = datetime.datetime(2024, 10, 1, 0, 0, 0)
 NULLRATE_COLUMN = "passenger_count"
 SEEDED_ROW_COUNT = 1000
 SEEDED_NULL_COUNT = 50
+# The real Flink job writes 66 column_metrics rows per window.
+REAL_METRICS_PER_WINDOW = 66
+RELOAD_TIMEOUT_SECONDS = 10.0
 
 INCIDENT_TABLES = (
     "weir_incidents.incidents",
@@ -43,8 +46,15 @@ INCIDENT_TABLES = (
 )
 
 
-def seed(conn, windows):
-    """N consecutive one-minute windows, bulk-loaded via COPY."""
+def seed(conn, windows, metrics_per_window):
+    """N consecutive one-minute windows, bulk-loaded via COPY.
+
+    metrics_per_window controls how much filler goes into column_metrics
+    beyond the one row the null-rate detector reads. The real Flink job
+    writes 66 metrics per window, so a probe that seeds only the single
+    row it needs leaves the database orders of magnitude smaller than a
+    benchmark's - and a scoring loop whose index pages all fit in shared
+    buffers is not measuring the same thing as one whose don't."""
     with conn.cursor() as cur:
         cur.execute("TRUNCATE weir_metrics.window_metrics, weir_metrics.column_metrics")
         with cur.copy(
@@ -59,11 +69,24 @@ def seed(conn, windows):
         ) as copy:
             for i in range(windows):
                 start = SEED_ANCHOR + datetime.timedelta(minutes=i)
+                end = start + datetime.timedelta(minutes=1)
                 copy.write_row(
-                    (start, start + datetime.timedelta(minutes=1),
-                     NULLRATE_COLUMN, "null_count", float(SEEDED_NULL_COUNT))
+                    (start, end, NULLRATE_COLUMN, "null_count", float(SEEDED_NULL_COUNT))
                 )
+                for f in range(metrics_per_window - 1):
+                    copy.write_row((start, end, f"filler_{f}", "null_count", 0.0))
     conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("ANALYZE weir_metrics.window_metrics")
+        cur.execute("ANALYZE weir_metrics.column_metrics")
+        cur.execute(
+            "SELECT pg_size_pretty(pg_total_relation_size('weir_metrics.column_metrics')), "
+            "       pg_size_pretty(pg_database_size(current_database()))"
+        )
+        cm_size, db_size = cur.fetchone()
+    conn.commit()
+    print(f"  column_metrics {cm_size}, database {db_size} "
+          f"(shared_buffers is Postgres' 128MB default)")
 
 
 def reset_incidents(conn):
@@ -117,6 +140,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--windows", type=int, default=20000,
                         help="consecutive one-minute windows to seed and score")
+    parser.add_argument("--metrics-per-window", type=int, default=REAL_METRICS_PER_WINDOW,
+                        help="column_metrics rows per window, matching what the Flink "
+                             "job really writes, so the database is realistically sized")
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=5432)
     parser.add_argument("--dbname", default="weir_catalog")
@@ -131,8 +157,9 @@ def main():
     conn = psycopg.connect(conninfo, autocommit=False, connect_timeout=10)
     rates = {}
     try:
-        print(f"seeding {args.windows} one-minute windows from {SEED_ANCHOR} ...")
-        seed(conn, args.windows)
+        print(f"seeding {args.windows} one-minute windows from {SEED_ANCHOR}, "
+              f"{args.metrics_per_window} column metrics each ...")
+        seed(conn, args.windows, args.metrics_per_window)
 
         # ALTER SYSTEM refuses to run inside a transaction block, and the
         # detector connection is deliberately autocommit=False, so the
@@ -146,18 +173,28 @@ def main():
                 with admin.cursor() as cur:
                     cur.execute(f"ALTER SYSTEM SET synchronous_commit = '{setting}'")
                     cur.execute("SELECT pg_reload_conf()")
-                # Read it back on the connection that will actually do the
-                # scoring - a reload the detector session hasn't picked up
-                # would silently measure the wrong thing.
-                conn.rollback()
-                with conn.cursor() as cur:
-                    cur.execute("SHOW synchronous_commit")
-                    (effective,) = cur.fetchone()
-                conn.rollback()
-                if effective != setting:
-                    print(f"FAIL: asked for synchronous_commit={setting}, "
-                          f"the scoring session reports {effective}")
-                    sys.exit(1)
+                # Read it back on the connection that will actually do
+                # the scoring - a reload the detector session hasn't
+                # picked up would silently measure the wrong thing.
+                # pg_reload_conf() only signals the backends; each
+                # applies the change when it next checks for interrupts,
+                # so this polls instead of reading once. The first
+                # attempt lost that race by three milliseconds.
+                deadline = time.monotonic() + RELOAD_TIMEOUT_SECONDS
+                while True:
+                    conn.rollback()
+                    with conn.cursor() as cur:
+                        cur.execute("SHOW synchronous_commit")
+                        (effective,) = cur.fetchone()
+                    conn.rollback()
+                    if effective == setting:
+                        break
+                    if time.monotonic() > deadline:
+                        print(f"FAIL: asked for synchronous_commit={setting}, but the "
+                              f"scoring session still reports {effective} after "
+                              f"{RELOAD_TIMEOUT_SECONDS}s")
+                        sys.exit(1)
+                    time.sleep(0.1)
                 timings, counts = time_detectors(conn)
                 rates[setting] = report(setting, timings, counts)
 
