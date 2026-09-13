@@ -134,29 +134,38 @@ def main():
         print(f"seeding {args.windows} one-minute windows from {SEED_ANCHOR} ...")
         seed(conn, args.windows)
 
-        for setting in ("on", "off"):
-            reset_incidents(conn)
-            # ALTER SYSTEM + reload rather than SET: the detectors open
-            # their work on this same connection, but the setting has to
-            # survive the transactions run_once opens and closes.
-            with conn.cursor() as cur:
-                cur.execute(f"ALTER SYSTEM SET synchronous_commit = '{setting}'")
-                cur.execute("SELECT pg_reload_conf()")
-            conn.commit()
-            with conn.cursor() as cur:
-                cur.execute("SHOW synchronous_commit")
-                (effective,) = cur.fetchone()
-            if effective != setting:
-                print(f"FAIL: asked for synchronous_commit={setting}, "
-                      f"session reports {effective}")
-                sys.exit(1)
-            timings, counts = time_detectors(conn)
-            rates[setting] = report(setting, timings, counts)
+        # ALTER SYSTEM refuses to run inside a transaction block, and the
+        # detector connection is deliberately autocommit=False, so the
+        # cluster-wide setting is driven from a separate admin session.
+        # ALTER SYSTEM rather than SET: it has to survive the transactions
+        # run_once opens and closes for every window.
+        admin = psycopg.connect(conninfo, autocommit=True, connect_timeout=10)
+        try:
+            for setting in ("on", "off"):
+                reset_incidents(conn)
+                with admin.cursor() as cur:
+                    cur.execute(f"ALTER SYSTEM SET synchronous_commit = '{setting}'")
+                    cur.execute("SELECT pg_reload_conf()")
+                # Read it back on the connection that will actually do the
+                # scoring - a reload the detector session hasn't picked up
+                # would silently measure the wrong thing.
+                conn.rollback()
+                with conn.cursor() as cur:
+                    cur.execute("SHOW synchronous_commit")
+                    (effective,) = cur.fetchone()
+                conn.rollback()
+                if effective != setting:
+                    print(f"FAIL: asked for synchronous_commit={setting}, "
+                          f"the scoring session reports {effective}")
+                    sys.exit(1)
+                timings, counts = time_detectors(conn)
+                rates[setting] = report(setting, timings, counts)
 
-        with conn.cursor() as cur:
-            cur.execute("ALTER SYSTEM RESET synchronous_commit")
-            cur.execute("SELECT pg_reload_conf()")
-        conn.commit()
+            with admin.cursor() as cur:
+                cur.execute("ALTER SYSTEM RESET synchronous_commit")
+                cur.execute("SELECT pg_reload_conf()")
+        finally:
+            admin.close()
     finally:
         conn.close()
 
