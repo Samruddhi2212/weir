@@ -51,27 +51,115 @@ def render_block(result_file: Path | None) -> str:
     data = json.loads(result_file.read_text(encoding="utf-8"))
     run_at = data.get("run_at", "unknown")
     scenarios = data.get("scenarios", [])
+    summary = data.get("summary", {})
+
+    def pct(value: object) -> str:
+        # Four decimals, never rounded to something flattering: 3/7 reads
+        # 42.8571%, not 43%.
+        return f"{value * 100:.4f}%" if isinstance(value, (int, float)) else "n/a"
+
+    def seconds(value: object) -> str:
+        # "n/a" where nothing was measured - never 0, which would read as
+        # "instant" rather than "not measured".
+        return f"{value:.0f}s" if isinstance(value, (int, float)) else "n/a"
 
     lines = [
         f"Run: `{result_file.name}` ({run_at})",
         "",
-        "| Scenario | Detection Rate | False Positive Rate | Detection Latency (ms) |",
-        "|---|---|---|---|",
+        "| Scenario | Detected | Latency (event time) |",
+        "|---|---|---|",
     ]
-    for s in scenarios:
-        name = s.get("scenario", "unknown")
-        detection_rate = s.get("detection_rate")
-        fp_rate = s.get("false_positive_rate")
-        latency_ms = s.get("detection_latency_ms")
-        dr = (
-            f"{detection_rate * 100:.1f}%"
-            if isinstance(detection_rate, (int, float))
-            else "n/a"
-        )
-        fp = f"{fp_rate * 100:.1f}%" if isinstance(fp_rate, (int, float)) else "n/a"
-        lat = str(latency_ms) if latency_ms is not None else "n/a"
-        lines.append(f"| {name} | {dr} | {fp} | {lat} |")
+    for entry in scenarios:
+        name = entry.get("name", "unknown")
+        if entry.get("detected"):
+            detected = "yes"
+        elif entry.get("expected_detector") is None:
+            detected = "no (expected miss)"
+        else:
+            detected = "no"
+        lines.append(f"| {name} | {detected} | {seconds(entry.get('detection_latency_seconds'))} |")
 
+    lines += [
+        "",
+        "| Measure | Value |",
+        "|---|---|",
+        f"| Scenarios flagged, all (incl. expected misses) | "
+        f"{summary.get('detection_rate_fraction', 'n/a')} ({pct(summary.get('detection_rate'))}) |",
+        f"| Scenarios flagged, targeted only | "
+        f"{summary.get('targeted_detection_rate_fraction', 'n/a')} "
+        f"({pct(summary.get('targeted_detection_rate'))}) |",
+        f"| Spurious incidents per scored window, clean replay | "
+        f"{summary.get('false_positive_rate_fraction', 'n/a')} "
+        f"({pct(summary.get('false_positive_rate'))}) |",
+        f"| Of those, at a band boundary (sampling artifact) | "
+        f"{summary.get('false_positives_at_band_boundaries', 'n/a')} |",
+        f"| Median / p95 time to flag (event time) | "
+        f"{seconds(summary.get('detection_latency_median_seconds'))} / "
+        f"{seconds(summary.get('detection_latency_p95_seconds'))} |",
+        f"| Warmed buckets across {summary.get('band_count', 'n/a')} bands | "
+        f"{summary.get('warmed_buckets', 'n/a')} |",
+        f"| Clean event-time hours covered | "
+        f"{summary.get('clean_event_time_hours', 0):.2f} |"
+        if isinstance(summary.get("clean_event_time_hours"), (int, float))
+        else "| Clean event-time hours covered | n/a |",
+        f"| Unattributed incidents, injected replay | "
+        f"{summary.get('unattributed_injected_incidents', 'n/a')} |",
+    ]
+
+    spread = render_spread(sorted(RESULTS_DIR.glob("*.json")))
+    if spread:
+        lines += ["", spread]
+
+    return "\n".join(lines)
+
+
+def render_spread(result_files: list[Path]) -> str:
+    """Cross-run spread, generated rather than typed.
+
+    A single run cannot say whether a figure is stable, and CLAUDE.md V4
+    is explicit that one green run means nothing. Where every run agrees
+    this says so; where they don't it prints the range rather than a
+    central value that would hide it.
+    """
+    if len(result_files) < 2:
+        return ""
+
+    runs = [json.loads(f.read_text(encoding="utf-8")) for f in result_files]
+    summaries = [r.get("summary", {}) for r in runs]
+    count = len(runs)
+
+    def agreed(key: str) -> str | None:
+        values = {json.dumps(s.get(key)) for s in summaries}
+        return json.loads(next(iter(values))) if len(values) == 1 else None
+
+    def spread_of(key: str) -> str:
+        values = [s.get(key) for s in summaries if isinstance(s.get(key), (int, float))]
+        if not values:
+            return "n/a"
+        low, high = min(values), max(values)
+        if low == high:
+            return f"{low:.0f} in all {count}"
+        ratio = f", {high / low:.1f}x" if low else ""
+        return f"{low:.0f} .. {high:.0f}{ratio}"
+
+    def stable(key: str, label: str) -> str:
+        value = agreed(key)
+        return f"| {label} | {value} in all {count} |" if value is not None else \
+               f"| {label} | varies: {spread_of(key)} |"
+
+    lines = [
+        f"Across {count} runs of the same input and code:",
+        "",
+        "| Measure | Across runs |",
+        "|---|---|",
+        stable("detection_rate_fraction", "Scenarios flagged, all"),
+        stable("targeted_detection_rate_fraction", "Scenarios flagged, targeted only"),
+        stable("false_positive_rate_fraction", "Spurious incidents per scored window"),
+        stable("warmed_buckets", "Warmed buckets"),
+        f"| Median time to flag (event time) | {spread_of('detection_latency_median_seconds')} |",
+        f"| Unattributed incidents, injected replay | "
+        f"{spread_of('unattributed_injected_incidents')} |",
+    ]
     return "\n".join(lines)
 
 

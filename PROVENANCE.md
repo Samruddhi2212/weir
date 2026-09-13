@@ -82,7 +82,9 @@
 - OpenLineage event spec — Weir's lineage event shape is modeled on it, not
   adapted from its code
 - AWS Deequ anomaly detection module — read as a baseline strategy
-  comparison (see DEFENSE.md #4)
+  comparison. Deequ itself is discussed nowhere in DEFENSE.md; the
+  baseline strategy this project actually chose, and the alternatives it
+  rejected, are DEFENSE.md #44.
 
 ## Written from scratch
 
