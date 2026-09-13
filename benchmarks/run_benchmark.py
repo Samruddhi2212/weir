@@ -44,7 +44,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import psycopg
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -110,6 +109,12 @@ def fail(msg):
 
 
 def connect(args):
+    # Local import, matching reliability/volume/run.py: the scoring,
+    # attribution and summary logic above is pure and unit-tested
+    # without a live database, and a module-level psycopg would make the
+    # whole test module unimportable wherever the driver isn't installed.
+    import psycopg
+
     return psycopg.connect(
         f"host={args.host} port={args.port} dbname={args.dbname} "
         f"user={args.user} password={args.password}",
