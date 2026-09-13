@@ -59,8 +59,8 @@ jobs:
           docker compose exec -T postgres psql -U weir -d weir_catalog \
             < reliability/store/incidents_schema.sql
       - name: Download the months the contiguous span covers
-        # Warming one bucket needs ~8 weekly occurrences of its hour;
-        # four months gives ~17, leaving real headroom to score in.
+        # 12 contiguous weeks at 0.85 warmup = ~10.2 weekly samples per
+        # bucket (612 observations vs the 480 floor) before injections start.
         run: |
           for MONTH in 2024-10 2024-11 2024-12; do
             python ingestion/replay/download_tlc_data.py --year-month "$MONTH" --output-dir data/tlc
@@ -72,6 +72,7 @@ jobs:
                     data/tlc/yellow_tripdata_2024-11.parquet \
                     data/tlc/yellow_tripdata_2024-12.parquet \
             --span-weeks 12 \
+            --warmup-fraction 0.85 \
             --populate-timeout 7200 \
             --bootstrap-server localhost:${KAFKA_EXTERNAL_PORT:-29092}
       - name: Upload raw results

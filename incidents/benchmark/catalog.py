@@ -299,8 +299,19 @@ class UpstreamBackfillReplay(Scenario):
     severity = Severity.LOW
     expected_detector = None
 
-    def __init__(self, starts_at, backfill_age, backfill_span):
+    def __init__(self, starts_at, backfill_age, backfill_span, source_events=None):
+        """source_events lets a caller supply the rows to replay
+        directly, instead of having them filtered out of the stream
+        passed to inject().
+
+        The benchmark runner needs this: the source window sits in the
+        warmup region, and materialising the whole multi-million-row
+        warmup just so this scenario can find a day of it would exhaust
+        memory. When given, the rows are used as-is; when not, behaviour
+        is unchanged.
+        """
         super().__init__(starts_at, ends_at=None)
+        self.source_events = source_events
         if backfill_age.total_seconds() <= 0:
             raise ValueError(f"backfill_age must be positive, got {backfill_age!r}")
         if backfill_span.total_seconds() <= 0:
@@ -309,12 +320,15 @@ class UpstreamBackfillReplay(Scenario):
         self.backfill_span = backfill_span
 
     def inject(self, events):
-        replay_from = self.starts_at - self.backfill_age
-        replay_until = replay_from + self.backfill_span
-        replayed = [
-            dict(event) for event in events
-            if replay_from <= event[PICKUP_COLUMN] < replay_until
-        ]
+        if self.source_events is not None:
+            replayed = [dict(event) for event in self.source_events]
+        else:
+            replay_from = self.starts_at - self.backfill_age
+            replay_until = replay_from + self.backfill_span
+            replayed = [
+                dict(event) for event in events
+                if replay_from <= event[PICKUP_COLUMN] < replay_until
+            ]
 
         out = []
         spliced = False

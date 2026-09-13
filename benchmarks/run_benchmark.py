@@ -115,26 +115,25 @@ def connect(args):
 # --------------------------------------------------------------------
 
 def load_contiguous(paths, span_weeks, starts_at=None):
-    """Load a contiguous event-time slice - every minute in the span, no
-    sampling.
+    """A contiguous event-time slice as an Arrow table - deliberately NOT
+    Python dicts.
 
     Replaces the earlier (weekday, hour) band sampling, which was a
     mistake: band sampling leaves ~42-hour gaps between occurrences, and
     the freshness detector's entire signal IS the gap between consecutive
     windows, so its baseline learned those artificial gaps as normal and
-    the detector became unmeasurable by construction. It also fed the
-    volume detector a baseline built only from four hours of the week.
+    the detector became unmeasurable by construction.
 
-    Contiguity is the requirement; span is the negotiable part. A bucket
-    gains one weekly sample per calendar week, so span_weeks IS the
-    per-bucket sample count - 10 weeks clears min_observations' 8-week
-    floor (DEFENSE.md #44) with room to inject afterwards, while the full
-    17.4-week dataset costs ~5.4h/run against a 6h CI ceiling.
+    Returns Arrow because a contiguous 12-week slice is ~10.5M rows, and
+    to_pylist() on that builds ~10GB of dicts and gets the CI runner
+    OOM-killed (exit 143) while Kafka, Postgres and Flink share the same
+    16GB box. Only the injection region is ever materialised - see
+    build_injected_table.
 
-    Filtered per file in pyarrow before materialising: the four months are
-    14.6M rows and a full to_pylist() would be gigabytes of dicts. Schemas
-    differ across months (cbd_congestion_fee only exists from 2025-01,
-    DEFENSE.md #49), so concat promotes rather than refusing to combine.
+    Implausible timestamps are dropped BEFORE anchoring: this dataset's
+    earliest pickup is a 2009 clock error, so anchoring on a raw min()
+    put the span in 2009 and selected one event. Reuses
+    load_pickup_timestamps' already-verified plausible window.
     """
     tables = []
     for path in paths:
@@ -144,12 +143,6 @@ def load_contiguous(paths, span_weeks, starts_at=None):
         tables.append(table)
     combined = pa.concat_tables(tables, promote_options="default").sort_by(PICKUP_COLUMN)
 
-    # Drop implausible timestamps BEFORE anchoring the span. This
-    # dataset's earliest pickup is a 2009 clock error (the loader's own
-    # tests document 2002/2008/2009 strays), so anchoring on a raw
-    # min() put the 10-week window in 2009 and selected one event -
-    # a silently empty benchmark. Reuses load_pickup_timestamps'
-    # already-verified plausible window rather than a second copy.
     window_start, window_end = plausible_window([str(path) for path in paths])
     column = combined.column(PICKUP_COLUMN)
     plausible = pc.and_(
@@ -158,37 +151,73 @@ def load_contiguous(paths, span_weeks, starts_at=None):
     )
     dropped = combined.num_rows - pc.sum(pc.cast(plausible, pa.int64())).as_py()
     if dropped:
-        print(f"  dropped {dropped} implausible timestamps outside "
-              f"{window_start} .. {window_end}")
+        print(f"  dropped {dropped} implausible timestamps outside {window_start} .. {window_end}")
     combined = combined.filter(plausible)
 
     column = combined.column(PICKUP_COLUMN)
     first_event = starts_at or pc.min(column).as_py()
     last_event = first_event + datetime.timedelta(weeks=span_weeks)
-    mask = pc.and_(
+    sliced = combined.filter(pc.and_(
         pc.greater_equal(column, pa.scalar(first_event)),
         pc.less(column, pa.scalar(last_event)),
-    )
-    sliced = combined.filter(mask)
+    ))
     print(f"  contiguous slice {first_event} .. {last_event} "
-          f"({span_weeks} weeks): {sliced.num_rows} of {combined.num_rows} rows")
+          f"({span_weeks} weeks): {sliced.num_rows} rows")
     if sliced.num_rows == 0:
         fail(f"no events in the contiguous span {first_event} .. {last_event}")
 
-    rows = sliced.to_pylist()
-    for index, row in enumerate(rows):
-        row["_row_index"] = index
-    return rows
+    # Stable global keys, assigned once over the whole slice so they stay
+    # unique across the warmup passthrough and the injected region.
+    return sliced.append_column("_row_index", pa.array(range(sliced.num_rows), type=pa.int64()))
 
 
-def build_scenarios(events, warmup_fraction):
+def table_bounds(table):
+    column = table.column(PICKUP_COLUMN)
+    return pc.min(column).as_py(), pc.max(column).as_py()
+
+
+def rows_between(table, start, end):
+    """Materialise only a bounded slice as dicts."""
+    column = table.column(PICKUP_COLUMN)
+    mask = pc.and_(pc.greater_equal(column, pa.scalar(start)), pc.less(column, pa.scalar(end)))
+    return table.filter(mask).to_pylist()
+
+
+def build_injected_table(table, scenarios, injection_start):
+    """Apply the catalog without materialising the warmup region.
+
+    Every scenario only touches events inside its own declared span, and
+    all spans sit after injection_start - with one exception, the
+    backfill, whose source window is deliberately in warmup. That slice
+    is materialised on its own and handed to the scenario directly, so
+    the multi-million-row warmup never becomes Python dicts.
+    """
+    column = table.column(PICKUP_COLUMN)
+    warmup = table.filter(pc.less(column, pa.scalar(injection_start)))
+    injection_rows = table.filter(pc.greater_equal(column, pa.scalar(injection_start))).to_pylist()
+    print(f"  materialised {len(injection_rows)} injection-region rows "
+          f"({warmup.num_rows} warmup rows passed through as Arrow)")
+
+    for scenario in scenarios:
+        if isinstance(scenario, UpstreamBackfillReplay):
+            replay_from = scenario.starts_at - scenario.backfill_age
+            scenario.source_events = rows_between(
+                table, replay_from, replay_from + scenario.backfill_span
+            )
+            print(f"  backfill source: {len(scenario.source_events)} rows from {replay_from}")
+
+    injected_rows = compose(scenarios, injection_rows)
+    injected_table = pa.Table.from_pylist(injected_rows, schema=table.schema)
+    return pa.concat_tables([warmup, injected_table]), len(injected_rows), warmup.num_rows
+
+
+def build_scenarios(first, last, warmup_fraction):
     """Place every catalog scenario in the injection portion of the
     slice. Injections must land AFTER the warmup portion - a detector
     with an unwarmed baseline cannot score anything, so an injection
     during warmup would be scored as a detector miss when it is really
     an experiment-design error.
     """
-    first, last = events[0][PICKUP_COLUMN], events[-1][PICKUP_COLUMN]
     span = last - first
     injection_start = first + span * warmup_fraction
 
@@ -269,62 +298,69 @@ def assert_spans_disjoint(scenarios):
              + "; ".join(overlaps))
 
 
-def predict_emitted_count(scenarios, clean_events):
-    """Independently predict how many rows the injected stream should
-    carry, from each scenario's declared effect - NOT by measuring the
-    transformed list (that would assert a transform against itself).
+def count_between(table, start, end):
+    column = table.column(PICKUP_COLUMN)
+    mask = pc.and_(pc.greater_equal(column, pa.scalar(start)), pc.less(column, pa.scalar(end)))
+    return pc.sum(pc.cast(mask, pa.int64())).as_py() or 0
 
-    Only the two scenarios that change cardinality are counted here;
-    reordering and mutation preserve it. Drops are counted by asking
-    each scenario which events it would remove, which is the same
-    declared rule the injection uses, evaluated separately.
+
+def predict_emitted_count(scenarios, table, slice_end):
+    """Independently predict how many rows the injected stream should
+    carry, from each scenario's DECLARED effect - never by measuring the
+    transformed output, which would assert a transform against itself.
+
+    Counted over the Arrow table so the prediction costs no memory. The
+    dropping scenarios are evaluated against only their own span, which
+    is exactly the rule they declare, computed a second way.
     """
-    total = len(clean_events)
+    total = table.num_rows
     for scenario in scenarios:
+        span_end = scenario.ends_at or slice_end
         if isinstance(scenario, DuplicateEventStorm):
-            in_span = sum(1 for e in clean_events if scenario.covers(e[PICKUP_COLUMN]))
-            total += in_span * (scenario.copies - 1)
+            total += count_between(table, scenario.starts_at, span_end) * (scenario.copies - 1)
         elif isinstance(scenario, UpstreamBackfillReplay):
             replay_from = scenario.starts_at - scenario.backfill_age
-            replay_until = replay_from + scenario.backfill_span
-            total += sum(1 for e in clean_events if replay_from <= e[PICKUP_COLUMN] < replay_until)
+            total += count_between(table, replay_from, replay_from + scenario.backfill_span)
         elif isinstance(scenario, (PartitionDegradation, GradualDelay, SlowVolumeDecline)):
-            total -= len(clean_events) - len(scenario.inject(clean_events))
+            in_span = rows_between(table, scenario.starts_at, span_end)
+            total -= len(in_span) - len(scenario.inject(in_span))
     return total
+
+
+def peak_rss_mb():
+    """Peak resident memory for this process, so the headroom against the
+    runner's ceiling is reported rather than rediscovered by an OOM kill
+    on some later, larger run."""
+    try:
+        import resource
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    except (ImportError, AttributeError):
+        return None
 
 
 # --------------------------------------------------------------------
 # Replay + detection
 # --------------------------------------------------------------------
 
-def write_stream(events, path):
-    """Write the exact send order, _row_index included - replayed with
-    --preserve-input-order so neither is re-derived."""
-    pq.write_table(pa.Table.from_pylist(events), path)
-    return path
-
-
-def max_explainable_loss(scenarios, clean_events):
+def max_explainable_loss(scenarios, table, slice_end):
     """Upper bound on events the pipeline may legitimately fail to land.
 
     Only two scenarios can cause the pipeline to drop data: the backfill
-    replays months-old copies that are far past the watermark, and the
+    replays months-old copies far past the watermark, and the
     out-of-order flood makes part of its span arrive late. Bounding by
     "every event those two touch" deliberately over-counts rather than
     predicting Flink's exact watermark arithmetic - asserting a precise
     drop count would be asserting a model of Flink, not measuring it.
-    What this does catch is loss appearing anywhere it cannot be
-    explained, which is the V8 property that matters.
+    What this catches is loss appearing anywhere it cannot be explained,
+    which is the V8 property that matters.
     """
     bound = 0
     for scenario in scenarios:
         if isinstance(scenario, UpstreamBackfillReplay):
             replay_from = scenario.starts_at - scenario.backfill_age
-            replay_until = replay_from + scenario.backfill_span
-            bound += sum(1 for e in clean_events
-                         if replay_from <= e[PICKUP_COLUMN] < replay_until)
+            bound += count_between(table, replay_from, replay_from + scenario.backfill_span)
         elif isinstance(scenario, OutOfOrderFlood):
-            bound += sum(1 for e in clean_events if scenario.covers(e[PICKUP_COLUMN]))
+            bound += count_between(table, scenario.starts_at, scenario.ends_at or slice_end)
     return bound
 
 
@@ -636,6 +672,7 @@ def summarise(scenario_results, clean_incidents, clean_scored, clean_hours, unat
 
     return {
         "warmed_buckets": warmed_buckets,
+        "peak_rss_mb": peak_rss_mb(),
         "span_weeks": span_weeks,
         "bucket_samples": samples,
         "weekly_samples_median": min(weekly) if weekly else None,
@@ -696,6 +733,8 @@ def render_markdown(scenario_results, summary):
         f"{summary['span_weeks']}-week span",
         f"- weekly samples per bucket (median, lowest detector): "
         f"{summary['weekly_samples_median']}",
+        f"- peak resident memory: {summary['peak_rss_mb']} MB"
+        if summary.get("peak_rss_mb") else "- peak resident memory: unavailable on this platform",
         f"- clean event-time hours covered: {summary['clean_event_time_hours']:.2f}",
 
         f"- unattributed incidents in the injected replay: "
@@ -750,38 +789,51 @@ def main():
 
     print(f"=== Stage 1: load a contiguous {args.span_weeks}-week slice ===")
     span_start = datetime.datetime.fromisoformat(args.span_start) if args.span_start else None
-    clean_events = load_contiguous(args.input, args.span_weeks, starts_at=span_start)
-    if args.limit:
-        clean_events = clean_events[:args.limit]
-    if not clean_events:
-        fail(f"no events loaded from {args.input}")
-    slice_start = clean_events[0][PICKUP_COLUMN]
-    slice_end = clean_events[-1][PICKUP_COLUMN]
-    print(f"{len(clean_events)} real trips, event time {slice_start} .. {slice_end}")
+    clean_table = load_contiguous(args.input, args.span_weeks, starts_at=span_start)
+    slice_start, slice_end = table_bounds(clean_table)
+    print(f"{clean_table.num_rows} real trips, event time {slice_start} .. {slice_end}")
 
     print("\n=== Stage 2: fix ground truth before either replay (V7) ===")
-    scenarios = build_scenarios(clean_events, args.warmup_fraction)
+    scenarios = build_scenarios(slice_start, slice_end, args.warmup_fraction)
     assert_spans_disjoint(scenarios)
     for scenario in scenarios:
         print(f"  {scenario.name}: {scenario.starts_at} .. {scenario.ends_at} "
               f"-> expects {scenario.expected_detector or 'MISS (no detector targets it)'}")
 
-    injected_events = compose(scenarios, clean_events)
-    predicted = predict_emitted_count(scenarios, clean_events)
-    if len(injected_events) != predicted:
-        fail(f"injected stream has {len(injected_events)} events but the scenarios' declared "
-             f"effects predict {predicted} - a scenario is not doing what it declares")
-    print(f"PASS: injected stream is {len(injected_events)} events, matching the independent "
-          f"prediction from declared effects")
+    injection_start = min(s.starts_at for s in scenarios)
+    injected_table, injected_rows, warmup_rows = build_injected_table(
+        clean_table, scenarios, injection_start
+    )
+    predicted = predict_emitted_count(scenarios, clean_table, slice_end)
+
+    # Seam assertion (V7/V8): rows now take two paths - Arrow passthrough
+    # for warmup, materialised dicts for the injection region - and a
+    # silent drop at that seam would look exactly like a detection
+    # result. Both the total and the split are checked, so a loss on
+    # either side of the seam is caught rather than averaging out.
+    if injected_table.num_rows != predicted:
+        fail(f"injected stream has {injected_table.num_rows} rows but the scenarios' declared "
+             f"effects predict {predicted} - a scenario is not doing what it declares, or rows "
+             f"were lost at the Arrow/dict seam")
+    if warmup_rows + injected_rows != injected_table.num_rows:
+        fail(f"seam accounting is inconsistent: {warmup_rows} warmup + {injected_rows} injected "
+             f"!= {injected_table.num_rows} written")
+    expected_warmup = count_between(clean_table, slice_start, injection_start)
+    if warmup_rows != expected_warmup:
+        fail(f"the warmup passthrough carried {warmup_rows} rows but the slice holds "
+             f"{expected_warmup} before {injection_start} - rows were lost passing through Arrow")
+    print(f"PASS: injected stream is {injected_table.num_rows} rows "
+          f"({warmup_rows} warmup passthrough + {injected_rows} injected), matching the "
+          f"independent prediction from declared effects")
 
     with connect(args) as conn:
         phases = {}
-        for label, events, expected in (
-            ("clean", clean_events, len(clean_events)),
-            ("injected", injected_events, predicted),
+        for label, table, expected in (
+            ("clean", clean_table, clean_table.num_rows),
+            ("injected", injected_table, predicted),
         ):
             stream_path = REPO_ROOT / f"benchmarks/results/_stream_{label}.parquet"
-            write_stream(events, stream_path)
+            pq.write_table(table, stream_path)
             # Only the injected stream deliberately contains events the
             # pipeline is supposed to drop; the clean run keeps the exact
             # zero-loss invariant, which is what makes it a usable FP
@@ -829,7 +881,7 @@ def main():
         # attributable to a scenario that declares it - not merely
         # tolerated because injection was involved.
         injected_shortfall = predicted - injected["landed_rows"]
-        loss_bound = max_explainable_loss(scenarios, clean_events)
+        loss_bound = max_explainable_loss(scenarios, clean_table, slice_end)
         print(f"injected replay lost {injected_shortfall:.0f} of {predicted} events; "
               f"at most {loss_bound} are explainable by the scenarios that declare data loss")
         if injected_shortfall > loss_bound:
@@ -858,7 +910,8 @@ def main():
     path = write_results({
         "run_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "input": str(args.input),
-        "slice": {"start": slice_start, "end": slice_end, "events": len(clean_events)},
+        "slice": {"start": slice_start, "end": slice_end, "events": clean_table.num_rows},
+        "peak_rss_mb": peak_rss_mb(),
         "warmup_fraction": args.warmup_fraction,
         "span_weeks": args.span_weeks,
         "composition_order": [s.name for s in scenarios],
