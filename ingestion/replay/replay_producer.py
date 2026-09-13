@@ -23,7 +23,6 @@ import threading
 import time
 
 import pyarrow.parquet as pq
-from kafka import KafkaProducer
 
 PICKUP_COLUMN = "tpep_pickup_datetime"
 
@@ -269,6 +268,12 @@ def main():
             f"(skipping {args.resume_skip_ties} tie(s)) - {len(rows)} trips remain",
             file=sys.stderr,
         )
+
+    # Imported here, not at module scope: load_sorted_trips/filter_resume
+    # are pure functions over a parquet file, and importers that only need
+    # those (benchmarks/run_benchmark.py, and its unit tests) shouldn't
+    # need a Kafka driver installed to import this module at all.
+    from kafka import KafkaProducer
 
     producer = KafkaProducer(
         bootstrap_servers=[args.bootstrap_server],
