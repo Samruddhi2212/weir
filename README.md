@@ -115,14 +115,62 @@ bucket's tracked dispersion is wide, and a creep to 60% may simply not
 reach 3.5 sigma-equivalents against it. Confirming that needs the
 per-window baseline state, which this run didn't retain.
 
-**On the volume detector's false-positive rate specifically, once published:**
-read it as an upper bound, not a settled number. Its baseline uses 8 weekly
-samples per (weekday, hour) bucket, below the n≥20-30 robust-stats guidance
-generally wants for a stable robust scale estimate (DEFENSE.md #44) — a
-noisier MAD pushes a measured false-positive rate up, not down, so the real
-rate is more likely lower than whatever gets published than higher. A longer
-baseline than this project's ~17 weeks of replay data would likely lower it
-further.
+### Limitations of the method
+
+The three below are properties of how this benchmark is built, not of any
+particular run. They hold whatever the numbers say, and they are meant to
+be read before the numbers are.
+
+**1. The baselines are roughly half as mature as robust statistics wants.**
+Every detector keeps one baseline per `(weekday, hour)` bucket, so a bucket
+gains exactly one sample per calendar week of replayed time — the *Weekly
+samples per bucket* row above is what this run actually achieved. The
+guidance for a stable MAD-derived scale estimate is n ≥ 20–30 (DEFENSE.md
+#44), and this does not reach it. Twenty is not reachable here, and the
+reason is wall-clock rather than data availability: the TLC archive extends
+back years, so a longer span could be downloaded, but the replay cannot be
+extended to match. This benchmark drives real events through the full
+Kafka/Flink/Postgres path instead of simulating the pipeline, the span used
+here already takes hours, and a span long enough for n ≥ 20 runs past the
+six-hour ceiling on a single GitHub Actions job, which is where this
+benchmark executes. The two ways out are a different execution environment
+or a higher compression ratio — and compressing harder stops exercising the
+watermark and lag-buffer semantics the pipeline depends on, trading a known
+limitation for a hidden one. Neither is a change to a detector, and neither
+was made. Limitation 3 follows directly from this one.
+
+**2. The failure catalog is self-authored, which is not the same as
+independent.** The scenarios in `incidents/benchmark/` were written by the
+same author as the detectors they score. Four structural countermeasures
+are in place: the benchmark scenarios are deliberately variants the
+detectors were *not* built against rather than restatements of the
+development fixtures; `benchmarks/` is mechanically forbidden from
+importing `incidents/dev/`, enforced by a test, so the two cannot quietly
+converge; four of the seven scenarios are declared expected misses that no
+detector targets, and they stay in the denominator; and no detector was
+modified after any result was seen (CLAUDE.md hard rule 3). What none of
+that buys is independence. The scenarios that got written are correlated
+with the failure modes their author thought to defend against, and a
+failure mode nobody imagined is absent from the detectors and from the
+catalog alike — costing nothing here and everything in production. Read
+these figures as measuring the detectors against this catalog. They are
+not a claim about production incident coverage, and an external suite
+would be a different and better test.
+
+**3. The spurious-incident figure is an upper bound.** Two effects push it
+up and neither pushes it down. First, limitation 1: a scale estimate built
+from too few weekly samples is itself noisy, and that noise sits in the
+denominator of the z-score, so clean data crosses the threshold more often
+than it would against a mature baseline. Second, the clean phase is real
+TLC data, not a synthetic quiet stream — it contains genuine traffic
+anomalies (weather, holidays, irregular events) that nobody labelled, and
+an incident raised on one of those is counted against the detector here
+even though flagging it is arguably correct behaviour. Both effects are
+directional, not quantified: they say which way the bias runs, not how far.
+The honest reading is that the true false-positive rate — against a mature
+baseline and a labelled clean stream — is more likely below the published
+figure than above it. That is a statement about the bound, not a
+substitute for measuring it.
 
 ## Status
 
