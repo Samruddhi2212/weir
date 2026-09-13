@@ -1,0 +1,66 @@
+name: Scoring throughput probe
+
+# Sizing instrument for the benchmark, not a verification gate.
+#
+# Benchmark run 34757520031 spent 1h12m on replay and then 4h36m silently
+# inside clean-phase detector scoring before the 350-minute ceiling killed
+# it. This probe seeds window_metrics directly and times the scoring half
+# alone, so the feasible contiguous span comes from a measurement rather
+# than an estimate. Postgres only - no Kafka, Flink, or TLC download.
+#
+# Nothing here touches detector logic (hard rule 3). The single variable
+# is synchronous_commit, which changes durability, not any scored value.
+on:
+  workflow_dispatch:
+    inputs:
+      windows:
+        description: "Consecutive one-minute windows to seed and score"
+        required: false
+        default: "20000"
+
+jobs:
+  probe:
+    name: Time detector scoring against a seeded window_metrics
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r reliability/volume/requirements.txt
+      - name: Start Postgres
+        run: docker compose up -d postgres
+      - name: Wait for Postgres healthy
+        run: |
+          WAITED=0
+          MAX_WAIT=120
+          until docker compose ps postgres | grep -q "(healthy)"; do
+            WAITED=$((WAITED + 5))
+            if [ "$WAITED" -ge "$MAX_WAIT" ]; then
+              docker compose ps
+              docker compose logs postgres
+              echo "FAIL: postgres not healthy after ${MAX_WAIT}s"
+              exit 1
+            fi
+            sleep 5
+          done
+          docker compose ps postgres
+      - name: Apply both schemas
+        run: |
+          docker compose exec -T postgres psql -U weir -d weir_catalog \
+            < reliability/store/schema.sql
+          docker compose exec -T postgres psql -U weir -d weir_catalog \
+            < reliability/store/incidents_schema.sql
+      - name: Probe
+        run: |
+          python -u scripts/probe_scoring_throughput.py \
+            --windows "${{ github.event.inputs.windows }}" \
+            --port "${POSTGRES_PORT:-5432}"
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs postgres
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
