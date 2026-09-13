@@ -83,21 +83,30 @@ def fetch_eligible_windows(conn, config, assume_no_more_arrivals=False):
     return [r for r in rows if r[1] <= max_window_end_seen - lag_buffer]
 
 
-def run_once(conn, config=DEFAULT_CONFIG, assume_no_more_arrivals=False):
+def run_once(conn, config=DEFAULT_CONFIG, assume_no_more_arrivals=False, progress=None):
     """Registers the detector if needed, then processes every
     currently eligible window in order. Returns the list of statuses
     written, one per window processed. See fetch_eligible_windows for
-    assume_no_more_arrivals."""
+    assume_no_more_arrivals.
+
+    progress, if given, is called as progress(done, total) after each
+    window. Purely observational - a live poll processes a handful of
+    windows and needs nothing, but the benchmark processes six figures
+    of them in one call, where a silent loop is indistinguishable from
+    a hung one."""
     register_detector(conn, config.detector_name)
 
-    statuses = []
-    for window_start_naive, window_end_naive, row_count in fetch_eligible_windows(
+    eligible = fetch_eligible_windows(
         conn, config, assume_no_more_arrivals=assume_no_more_arrivals
-    ):
+    )
+    statuses = []
+    for window_start_naive, window_end_naive, row_count in eligible:
         window_start_utc = to_utc_instant(window_start_naive, config.timezone)
         window_end_utc = to_utc_instant(window_end_naive, config.timezone)
         status = process_window(conn, window_start_utc, window_end_utc, float(row_count), config)
         statuses.append(status)
+        if progress is not None:
+            progress(len(statuses), len(eligible))
     return statuses
 
 

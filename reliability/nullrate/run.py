@@ -64,18 +64,23 @@ def fetch_eligible_windows(conn, config, column_name, assume_no_more_arrivals=Fa
     return [r for r in results if r[1] <= max_window_end_seen - lag_buffer]
 
 
-def run_once(conn, column_name, assume_no_more_arrivals=False):
+def run_once(conn, column_name, assume_no_more_arrivals=False, progress=None):
+    """progress, if given, is called as progress(done, total) after each
+    window - see reliability/volume/run.py's run_once for why."""
     config = config_for_column(column_name)
     register_detector(conn, config.detector_name)
 
-    statuses = []
-    for window_start_naive, window_end_naive, null_rate in fetch_eligible_windows(
+    eligible = fetch_eligible_windows(
         conn, config, column_name, assume_no_more_arrivals=assume_no_more_arrivals
-    ):
+    )
+    statuses = []
+    for window_start_naive, window_end_naive, null_rate in eligible:
         window_start_utc = to_utc_instant(window_start_naive, config.timezone)
         window_end_utc = to_utc_instant(window_end_naive, config.timezone)
         status = process_window(conn, window_start_utc, window_end_utc, null_rate, config)
         statuses.append(status)
+        if progress is not None:
+            progress(len(statuses), len(eligible))
     return statuses
 
 
