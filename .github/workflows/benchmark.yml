@@ -14,7 +14,7 @@ jobs:
   benchmark:
     name: Clean + injected replay, measure detection rate / FP rate / latency
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -58,11 +58,11 @@ jobs:
         run: |
           docker compose exec -T postgres psql -U weir -d weir_catalog \
             < reliability/store/incidents_schema.sql
-      - name: Download four months of real NYC TLC data
+      - name: Download the months the contiguous span covers
         # Warming one bucket needs ~8 weekly occurrences of its hour;
         # four months gives ~17, leaving real headroom to score in.
         run: |
-          for MONTH in 2024-10 2024-11 2024-12 2025-01; do
+          for MONTH in 2024-10 2024-11 2024-12; do
             python ingestion/replay/download_tlc_data.py --year-month "$MONTH" --output-dir data/tlc
           done
       - name: Run the benchmark
@@ -71,7 +71,8 @@ jobs:
             --input data/tlc/yellow_tripdata_2024-10.parquet \
                     data/tlc/yellow_tripdata_2024-11.parquet \
                     data/tlc/yellow_tripdata_2024-12.parquet \
-                    data/tlc/yellow_tripdata_2025-01.parquet \
+            --span-weeks 12 \
+            --populate-timeout 7200 \
             --bootstrap-server localhost:${KAFKA_EXTERNAL_PORT:-29092}
       - name: Upload raw results
         if: always()
