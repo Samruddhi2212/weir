@@ -386,6 +386,7 @@ def populate(args, stream_path, expected_count, label, allow_late_drop=False):
         "--limit", str(expected_count),
         "--expected-emitted-count", str(expected_count),
         "--preserve-input-order",
+        "--replay-timeout", str(args.replay_timeout),
     ]
     if allow_late_drop:
         cmd.append("--allow-late-drop")
@@ -785,6 +786,9 @@ def main():
                              "injection - an injection during warmup would be scored as a "
                              "detector miss when it is an experiment-design error")
     parser.add_argument("--populate-timeout", type=int, default=3600)
+    parser.add_argument("--replay-timeout", type=int, default=7200,
+                        help="seconds allowed for each replay; measured throughput is "
+                             "~2,800 events/s, so millions of events need hours")
     args = parser.parse_args()
 
     print(f"=== Stage 1: load a contiguous {args.span_weeks}-week slice ===")
