@@ -29,7 +29,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install -r reliability/volume/requirements.txt
+        # pyarrow is not a detector dependency, but the volume adapter
+        # reaches DST_FALLBACK_AMBIGUOUS_HOURS through a parquet loader
+        # module, so importing any detector needs it present.
+        run: |
+          pip install pyarrow
+          pip install -r reliability/volume/requirements.txt
       - name: Start Postgres
         run: docker compose up -d postgres
       - name: Wait for Postgres healthy
