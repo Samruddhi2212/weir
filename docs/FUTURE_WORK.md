@@ -137,3 +137,34 @@ directories or files exist for these.
   `window_metrics` columns never being populated by `metrics_job.sql`
   (DEFENSE.md #52). Real, scoped-out work, not forgotten - needs the
   watermark/lateness computation wired into the Flink job first.
+
+- **Repeated-run variance is measured (5 runs) and is bimodal.** Which
+  scenarios get flagged,
+  the clean-replay spurious-incident count, warmed buckets and covered
+  hours were *bit-identical* between runs, while time-to-flag was not.
+  The cause is late-drop: three of five runs lost ~19,270 events to the
+  watermark and two lost none, from the same input - a race between replay
+  pacing and watermark advance that is not deterministic. It lands on one
+  of two values, never between them. Everything downstream
+  of that (how many incidents fire inside a scenario's span, and hence
+  the first one's timestamp) inherits the variance.
+
+- **Attribution cannot separate an injected failure from incidental
+  late-drop.** An incident is attributed to a scenario when the detector
+  matches and the window falls in the scenario's declared span. Both the
+  injected partition degradation and incidental late-drop produce the
+  same observable - fewer rows than the baseline expects - so a run that
+  happens to lose late data inside a scenario's window will flag earlier,
+  and the measured time-to-flag will be shorter for a reason that has
+  nothing to do with the scenario. Fixing this needs per-window
+  expected-vs-landed accounting inside the injected phase, not just the
+  aggregate bound the runner asserts today.
+
+- **The freshness detector is unmeasured by the benchmark.** Band
+  sampling (four `(weekday, hour)` bands, to warm baselines affordably)
+  leaves ~42-hour gaps between band occurrences, and the freshness
+  detector's signal *is* the gap between consecutive windows - so its
+  baseline learns those gaps as normal and a real multi-minute gap is
+  invisible. Measuring it needs a contiguous replay long enough to warm a
+  bucket without sampling gaps, which is a much heavier run than the
+  current one.

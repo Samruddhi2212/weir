@@ -1,0 +1,2309 @@
+{
+  "run_at": "2026-09-13T01:18:10.439821+00:00",
+  "input": "['data/tlc/yellow_tripdata_2024-10.parquet', 'data/tlc/yellow_tripdata_2024-11.parquet', 'data/tlc/yellow_tripdata_2024-12.parquet', 'data/tlc/yellow_tripdata_2025-01.parquet']",
+  "slice": {
+    "start": "2024-10-02T03:00:14",
+    "end": "2025-01-31T18:59:59",
+    "events": 385488
+  },
+  "warmup_fraction": 0.6,
+  "composition_order": [
+    "volume_partition_degradation",
+    "freshness_gradual_delay",
+    "nullrate_slow_creep",
+    "duplicate_event_storm",
+    "out_of_order_flood",
+    "upstream_backfill_replay",
+    "slow_volume_decline"
+  ],
+  "summary": {
+    "warmed_buckets": 12,
+    "bands": [
+      "0:8",
+      "4:18",
+      "2:3",
+      "5:13"
+    ],
+    "band_count": 4,
+    "false_positives_at_band_boundaries": 11,
+    "scenarios_total": 7,
+    "scenarios_detected": 1,
+    "detection_rate": 0.14285714285714285,
+    "detection_rate_fraction": "1/7",
+    "targeted_scenarios_total": 3,
+    "targeted_scenarios_detected": 1,
+    "targeted_detection_rate": 0.3333333333333333,
+    "targeted_detection_rate_fraction": "1/3",
+    "false_positives": 126,
+    "clean_scored_windows": 6582,
+    "false_positive_rate": 0.019143117593436645,
+    "false_positive_rate_fraction": "126/6582",
+    "clean_event_time_hours": 2919.9166666666665,
+    "detection_latency_median_seconds": 36235.0,
+    "detection_latency_p95_seconds": 36235.0,
+    "unattributed_injected_incidents": 180
+  },
+  "scenarios": [
+    {
+      "name": "volume_partition_degradation",
+      "starts_at": "2024-12-14T03:00:05",
+      "ends_at": "2024-12-19T23:09:40.280000",
+      "affected_dataset": "nyc_tlc_yellow_trips",
+      "affected_column": null,
+      "observable_in": "weir_metrics.window_metrics.row_count",
+      "severity": "high",
+      "expected_detector": "volume",
+      "detected": true,
+      "detection_latency_seconds": 36235.0,
+      "matching_incident_count": 3
+    },
+    {
+      "name": "freshness_gradual_delay",
+      "starts_at": "2024-12-20T22:31:16.160000",
+      "ends_at": "2024-12-27T18:02:27.320000",
+      "affected_dataset": "nyc_tlc_yellow_trips",
+      "affected_column": null,
+      "observable_in": "weir_metrics.window_metrics.window_end",
+      "severity": "high",
+      "expected_detector": "freshness",
+      "detected": false,
+      "detection_latency_seconds": null,
+      "matching_incident_count": 0
+    },
+    {
+      "name": "nullrate_slow_creep",
+      "starts_at": "2024-12-28T17:24:03.200000",
+      "ends_at": "2025-01-04T12:55:14.360000",
+      "affected_dataset": "nyc_tlc_yellow_trips",
+      "affected_column": "passenger_count",
+      "observable_in": "weir_metrics.column_metrics.null_count",
+      "severity": "medium",
+      "expected_detector": "null_rate_passenger_count",
+      "detected": false,
+      "detection_latency_seconds": null,
+      "matching_incident_count": 0
+    },
+    {
+      "name": "duplicate_event_storm",
+      "starts_at": "2025-01-05T12:16:50.240000",
+      "ends_at": "2025-01-10T09:04:49.640000",
+      "affected_dataset": "nyc_tlc_yellow_trips",
+      "affected_column": null,
+      "observable_in": "weir_metrics.window_metrics.row_count",
+      "severity": "medium",
+      "expected_detector": null,
+      "detected": false,
+      "detection_latency_seconds": null,
+      "matching_incident_count": 0
+    },
+    {
+      "name": "out_of_order_flood",
+      "starts_at": "2025-01-11T08:26:25.520000",
+      "ends_at": "2025-01-17T04:36:00.800000",
+      "affected_dataset": "nyc_tlc_yellow_trips",
+      "affected_column": null,
+      "observable_in": "weir_metrics.window_metrics.row_count",
+      "severity": "medium",
+      "expected_detector": null,
+      "detected": false,
+      "detection_latency_seconds": null,
+      "matching_incident_count": 0
+    },
+    {
+      "name": "upstream_backfill_replay",
+      "starts_at": "2025-01-18T03:57:36.680000",
+      "ends_at": null,
+      "affected_dataset": "nyc_tlc_yellow_trips",
+      "affected_column": null,
+      "observable_in": "weir_incidents.scored_windows.status",
+      "severity": "low",
+      "expected_detector": null,
+      "detected": false,
+      "detection_latency_seconds": null,
+      "matching_incident_count": 0
+    },
+    {
+      "name": "slow_volume_decline",
+      "starts_at": "2025-01-22T01:24:00.200000",
+      "ends_at": "2025-01-31T18:59:59",
+      "affected_dataset": "nyc_tlc_yellow_trips",
+      "affected_column": null,
+      "observable_in": "weir_metrics.window_metrics.row_count",
+      "severity": "high",
+      "expected_detector": null,
+      "detected": false,
+      "detection_latency_seconds": null,
+      "matching_incident_count": 0
+    }
+  ],
+  "clean_phase": {
+    "landed_rows": 384501.0,
+    "scored_windows": 6582,
+    "real_windows": 4185,
+    "warmed_buckets": 12,
+    "event_time_hours": 2919.9166666666665,
+    "statuses": {
+      "volume": 4185,
+      "freshness": 4184,
+      "null_rate_passenger_count": 4180
+    }
+  },
+  "injected_phase": {
+    "landed_rows": 382970.0,
+    "scored_windows": 6216,
+    "real_windows": 4061,
+    "warmed_buckets": 12,
+    "event_time_hours": 2919.9166666666665,
+    "statuses": {
+      "volume": 4061,
+      "freshness": 4060,
+      "null_rate_passenger_count": 4056
+    }
+  },
+  "false_positive_incidents": [
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-27T08:19:00+00:00",
+      "window_end": "2024-11-27T08:20:00+00:00",
+      "observed_value": 14.0,
+      "score": 3.613815163204045
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:08:00+00:00",
+      "window_end": "2024-11-29T23:09:00+00:00",
+      "observed_value": 90.0,
+      "score": -4.393174809392887
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:21:00+00:00",
+      "window_end": "2024-11-29T23:22:00+00:00",
+      "observed_value": 81.0,
+      "score": -4.663479572075042
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:22:00+00:00",
+      "window_end": "2024-11-29T23:23:00+00:00",
+      "observed_value": 96.0,
+      "score": -3.7119030565872535
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:24:00+00:00",
+      "window_end": "2024-11-29T23:25:00+00:00",
+      "observed_value": 85.0,
+      "score": -4.334478813028027
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:28:00+00:00",
+      "window_end": "2024-11-29T23:29:00+00:00",
+      "observed_value": 83.0,
+      "score": -4.354168112048748
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:31:00+00:00",
+      "window_end": "2024-11-29T23:32:00+00:00",
+      "observed_value": 92.0,
+      "score": -3.7541983781009516
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:32:00+00:00",
+      "window_end": "2024-11-29T23:33:00+00:00",
+      "observed_value": 88.0,
+      "score": -3.9612215316082655
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:35:00+00:00",
+      "window_end": "2024-11-29T23:36:00+00:00",
+      "observed_value": 92.0,
+      "score": -3.6590834740859823
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:37:00+00:00",
+      "window_end": "2024-11-29T23:38:00+00:00",
+      "observed_value": 94.0,
+      "score": -3.507681163261341
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:38:00+00:00",
+      "window_end": "2024-11-29T23:39:00+00:00",
+      "observed_value": 86.0,
+      "score": -3.937577353361462
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:41:00+00:00",
+      "window_end": "2024-11-29T23:42:00+00:00",
+      "observed_value": 92.0,
+      "score": -3.530967659382116
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:52:00+00:00",
+      "window_end": "2024-11-29T23:53:00+00:00",
+      "observed_value": 78.0,
+      "score": -4.111156792152408
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-02T13:53:00+00:00",
+      "window_end": "2024-12-02T13:54:00+00:00",
+      "observed_value": 115.0,
+      "score": 3.737053386430508
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-02T13:54:00+00:00",
+      "window_end": "2024-12-02T13:55:00+00:00",
+      "observed_value": 120.0,
+      "score": 4.253337381768857
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2024-12-04T08:00:00+00:00",
+      "window_end": "2024-12-04T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 73.89358343380587
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2024-12-11T08:00:00+00:00",
+      "window_end": "2024-12-11T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 66.58129015933142
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-14T18:04:00+00:00",
+      "window_end": "2024-12-14T18:05:00+00:00",
+      "observed_value": 155.0,
+      "score": 3.5638303461776677
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-14T18:05:00+00:00",
+      "window_end": "2024-12-14T18:06:00+00:00",
+      "observed_value": 157.0,
+      "score": 3.7430695934869975
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-14T18:18:00+00:00",
+      "window_end": "2024-12-14T18:19:00+00:00",
+      "observed_value": 155.0,
+      "score": 3.5097567648380554
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-14T18:21:00+00:00",
+      "window_end": "2024-12-14T18:22:00+00:00",
+      "observed_value": 160.0,
+      "score": 3.957466228709692
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-14T18:22:00+00:00",
+      "window_end": "2024-12-14T18:23:00+00:00",
+      "observed_value": 162.0,
+      "score": 4.1354357651964335
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-14T18:29:00+00:00",
+      "window_end": "2024-12-14T18:30:00+00:00",
+      "observed_value": 166.0,
+      "score": 4.471220640886507
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-14T18:30:00+00:00",
+      "window_end": "2024-12-14T18:31:00+00:00",
+      "observed_value": 158.0,
+      "score": 3.725721344196467
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-14T18:33:00+00:00",
+      "window_end": "2024-12-14T18:34:00+00:00",
+      "observed_value": 158.0,
+      "score": 3.7119990509128677
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-14T18:41:00+00:00",
+      "window_end": "2024-12-14T18:42:00+00:00",
+      "observed_value": 162.0,
+      "score": 4.050802684724836
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-14T18:45:00+00:00",
+      "window_end": "2024-12-14T18:46:00+00:00",
+      "observed_value": 159.0,
+      "score": 3.754112848724509
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-14T18:49:00+00:00",
+      "window_end": "2024-12-14T18:50:00+00:00",
+      "observed_value": 159.0,
+      "score": 3.7384051029657943
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-14T18:52:00+00:00",
+      "window_end": "2024-12-14T18:53:00+00:00",
+      "observed_value": 161.0,
+      "score": 3.9117967650110472
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-16T13:05:00+00:00",
+      "window_end": "2024-12-16T13:06:00+00:00",
+      "observed_value": 118.0,
+      "score": 3.5624114878391695
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-16T13:07:00+00:00",
+      "window_end": "2024-12-16T13:08:00+00:00",
+      "observed_value": 120.0,
+      "score": 3.7288781209065043
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-16T13:20:00+00:00",
+      "window_end": "2024-12-16T13:21:00+00:00",
+      "observed_value": 130.0,
+      "score": 4.539578138526692
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2024-12-18T08:00:00+00:00",
+      "window_end": "2024-12-18T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 60.74382333804863
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-18T08:01:00+00:00",
+      "window_end": "2024-12-18T08:02:00+00:00",
+      "observed_value": 17.0,
+      "score": 4.948978391085266
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-18T08:09:00+00:00",
+      "window_end": "2024-12-18T08:10:00+00:00",
+      "observed_value": 16.0,
+      "score": 4.494789780546976
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-18T08:13:00+00:00",
+      "window_end": "2024-12-18T08:14:00+00:00",
+      "observed_value": 14.0,
+      "score": 3.623923950407584
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-21T18:15:00+00:00",
+      "window_end": "2024-12-21T18:16:00+00:00",
+      "observed_value": 161.0,
+      "score": 3.8388210743160847
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-21T18:36:00+00:00",
+      "window_end": "2024-12-21T18:37:00+00:00",
+      "observed_value": 163.0,
+      "score": 3.9416356634981202
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-23T13:00:00+00:00",
+      "window_end": "2024-12-23T13:01:00+00:00",
+      "observed_value": 29.0,
+      "score": -4.757587200191244
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-23T13:03:00+00:00",
+      "window_end": "2024-12-23T13:04:00+00:00",
+      "observed_value": 40.0,
+      "score": -3.7426497984633356
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-23T13:04:00+00:00",
+      "window_end": "2024-12-23T13:05:00+00:00",
+      "observed_value": 41.0,
+      "score": -3.632438740184803
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-23T13:05:00+00:00",
+      "window_end": "2024-12-23T13:06:00+00:00",
+      "observed_value": 40.0,
+      "score": -3.693346632490189
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-23T13:06:00+00:00",
+      "window_end": "2024-12-23T13:07:00+00:00",
+      "observed_value": 35.0,
+      "score": -4.089716672835945
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-23T13:10:00+00:00",
+      "window_end": "2024-12-23T13:11:00+00:00",
+      "observed_value": 41.0,
+      "score": -3.5113739272021207
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-23T13:13:00+00:00",
+      "window_end": "2024-12-23T13:14:00+00:00",
+      "observed_value": 40.0,
+      "score": -3.5530278582834063
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2024-12-25T08:00:00+00:00",
+      "window_end": "2024-12-25T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 56.0579980876756
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-25T08:30:00+00:00",
+      "window_end": "2024-12-25T08:31:00+00:00",
+      "observed_value": 15.0,
+      "score": 3.9448390858988565
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-25T08:37:00+00:00",
+      "window_end": "2024-12-25T08:38:00+00:00",
+      "observed_value": 18.0,
+      "score": 5.201612336222068
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-27T23:03:00+00:00",
+      "window_end": "2024-12-27T23:04:00+00:00",
+      "observed_value": 79.0,
+      "score": -3.505078890887847
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:04:00+00:00",
+      "window_end": "2024-12-28T18:05:00+00:00",
+      "observed_value": 75.0,
+      "score": -3.9081508601950903
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:05:00+00:00",
+      "window_end": "2024-12-28T18:06:00+00:00",
+      "observed_value": 75.0,
+      "score": -3.880721578650274
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:06:00+00:00",
+      "window_end": "2024-12-28T18:07:00+00:00",
+      "observed_value": 77.0,
+      "score": -3.681594848111369
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:07:00+00:00",
+      "window_end": "2024-12-28T18:08:00+00:00",
+      "observed_value": 68.0,
+      "score": -4.427592465809563
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:08:00+00:00",
+      "window_end": "2024-12-28T18:09:00+00:00",
+      "observed_value": 74.0,
+      "score": -3.882197635916237
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:19:00+00:00",
+      "window_end": "2024-12-28T18:20:00+00:00",
+      "observed_value": 75.0,
+      "score": -3.62035321183248
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:26:00+00:00",
+      "window_end": "2024-12-28T18:27:00+00:00",
+      "observed_value": 61.0,
+      "score": -4.637672235174471
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:38:00+00:00",
+      "window_end": "2024-12-28T18:39:00+00:00",
+      "observed_value": 59.0,
+      "score": -4.566922510651115
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:39:00+00:00",
+      "window_end": "2024-12-28T18:40:00+00:00",
+      "observed_value": 69.0,
+      "score": -3.7639904961179886
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:07:00+00:00",
+      "window_end": "2024-12-30T13:08:00+00:00",
+      "observed_value": 28.0,
+      "score": -3.8804174371596574
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:08:00+00:00",
+      "window_end": "2024-12-30T13:09:00+00:00",
+      "observed_value": 30.0,
+      "score": -3.7083806331725415
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:13:00+00:00",
+      "window_end": "2024-12-30T13:14:00+00:00",
+      "observed_value": 21.0,
+      "score": -4.244439036989972
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:23:00+00:00",
+      "window_end": "2024-12-30T13:24:00+00:00",
+      "observed_value": 28.0,
+      "score": -3.554060614103422
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2025-01-01T08:00:00+00:00",
+      "window_end": "2025-01-01T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 52.19843916690876
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:00:00+00:00",
+      "window_end": "2025-01-01T08:01:00+00:00",
+      "observed_value": 93.0,
+      "score": 36.56196656730397
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:01:00+00:00",
+      "window_end": "2025-01-01T08:02:00+00:00",
+      "observed_value": 124.0,
+      "score": 48.95452481590577
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:02:00+00:00",
+      "window_end": "2025-01-01T08:03:00+00:00",
+      "observed_value": 92.0,
+      "score": 35.117369005505665
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:03:00+00:00",
+      "window_end": "2025-01-01T08:04:00+00:00",
+      "observed_value": 102.0,
+      "score": 38.751127183246936
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:04:00+00:00",
+      "window_end": "2025-01-01T08:05:00+00:00",
+      "observed_value": 88.0,
+      "score": 32.12571096797133
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:05:00+00:00",
+      "window_end": "2025-01-01T08:06:00+00:00",
+      "observed_value": 99.0,
+      "score": 34.453437665997406
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:06:00+00:00",
+      "window_end": "2025-01-01T08:07:00+00:00",
+      "observed_value": 82.0,
+      "score": 26.47121426652663
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:07:00+00:00",
+      "window_end": "2025-01-01T08:08:00+00:00",
+      "observed_value": 103.0,
+      "score": 32.299523138892525
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:08:00+00:00",
+      "window_end": "2025-01-01T08:09:00+00:00",
+      "observed_value": 109.0,
+      "score": 32.419411935391246
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:09:00+00:00",
+      "window_end": "2025-01-01T08:10:00+00:00",
+      "observed_value": 94.0,
+      "score": 26.124452289995507
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:10:00+00:00",
+      "window_end": "2025-01-01T08:11:00+00:00",
+      "observed_value": 95.0,
+      "score": 25.232669117246772
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:11:00+00:00",
+      "window_end": "2025-01-01T08:12:00+00:00",
+      "observed_value": 78.0,
+      "score": 19.461204218655187
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:12:00+00:00",
+      "window_end": "2025-01-01T08:13:00+00:00",
+      "observed_value": 88.0,
+      "score": 21.457154381570845
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:13:00+00:00",
+      "window_end": "2025-01-01T08:14:00+00:00",
+      "observed_value": 108.0,
+      "score": 25.77967827547794
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:14:00+00:00",
+      "window_end": "2025-01-01T08:15:00+00:00",
+      "observed_value": 90.0,
+      "score": 20.218659645969893
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:15:00+00:00",
+      "window_end": "2025-01-01T08:16:00+00:00",
+      "observed_value": 85.0,
+      "score": 18.32122000977078
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:16:00+00:00",
+      "window_end": "2025-01-01T08:17:00+00:00",
+      "observed_value": 84.0,
+      "score": 17.50404474118437
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:17:00+00:00",
+      "window_end": "2025-01-01T08:18:00+00:00",
+      "observed_value": 109.0,
+      "score": 22.538208933095614
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:18:00+00:00",
+      "window_end": "2025-01-01T08:19:00+00:00",
+      "observed_value": 100.0,
+      "score": 19.725602949688245
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:19:00+00:00",
+      "window_end": "2025-01-01T08:20:00+00:00",
+      "observed_value": 84.0,
+      "score": 15.728605304241885
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:20:00+00:00",
+      "window_end": "2025-01-01T08:21:00+00:00",
+      "observed_value": 73.0,
+      "score": 13.07264232892101
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:21:00+00:00",
+      "window_end": "2025-01-01T08:22:00+00:00",
+      "observed_value": 85.0,
+      "score": 15.140996683289373
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:22:00+00:00",
+      "window_end": "2025-01-01T08:23:00+00:00",
+      "observed_value": 73.0,
+      "score": 12.4269935365136
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:23:00+00:00",
+      "window_end": "2025-01-01T08:24:00+00:00",
+      "observed_value": 77.0,
+      "score": 12.908145940030204
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:24:00+00:00",
+      "window_end": "2025-01-01T08:25:00+00:00",
+      "observed_value": 92.0,
+      "score": 15.38180008388451
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:25:00+00:00",
+      "window_end": "2025-01-01T08:26:00+00:00",
+      "observed_value": 105.0,
+      "score": 17.302958183042694
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:26:00+00:00",
+      "window_end": "2025-01-01T08:27:00+00:00",
+      "observed_value": 84.0,
+      "score": 13.111278845713297
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:27:00+00:00",
+      "window_end": "2025-01-01T08:28:00+00:00",
+      "observed_value": 77.0,
+      "score": 11.61195087795933
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:28:00+00:00",
+      "window_end": "2025-01-01T08:29:00+00:00",
+      "observed_value": 82.0,
+      "score": 12.210770084467491
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:29:00+00:00",
+      "window_end": "2025-01-01T08:30:00+00:00",
+      "observed_value": 92.0,
+      "score": 13.588433987682373
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:30:00+00:00",
+      "window_end": "2025-01-01T08:31:00+00:00",
+      "observed_value": 63.0,
+      "score": 8.609627072946155
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:31:00+00:00",
+      "window_end": "2025-01-01T08:32:00+00:00",
+      "observed_value": 74.0,
+      "score": 10.217958247884013
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:32:00+00:00",
+      "window_end": "2025-01-01T08:33:00+00:00",
+      "observed_value": 83.0,
+      "score": 11.432655068609009
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:33:00+00:00",
+      "window_end": "2025-01-01T08:34:00+00:00",
+      "observed_value": 86.0,
+      "score": 11.658961076815618
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:34:00+00:00",
+      "window_end": "2025-01-01T08:35:00+00:00",
+      "observed_value": 65.0,
+      "score": 8.274518910550807
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:35:00+00:00",
+      "window_end": "2025-01-01T08:36:00+00:00",
+      "observed_value": 74.0,
+      "score": 9.481862367958412
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:36:00+00:00",
+      "window_end": "2025-01-01T08:37:00+00:00",
+      "observed_value": 78.0,
+      "score": 9.903703210302119
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:37:00+00:00",
+      "window_end": "2025-01-01T08:38:00+00:00",
+      "observed_value": 76.0,
+      "score": 9.443291556933001
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:38:00+00:00",
+      "window_end": "2025-01-01T08:39:00+00:00",
+      "observed_value": 68.0,
+      "score": 8.157736831602698
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:39:00+00:00",
+      "window_end": "2025-01-01T08:40:00+00:00",
+      "observed_value": 68.0,
+      "score": 8.039130090164607
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:40:00+00:00",
+      "window_end": "2025-01-01T08:41:00+00:00",
+      "observed_value": 82.0,
+      "score": 9.845158542276954
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:41:00+00:00",
+      "window_end": "2025-01-01T08:42:00+00:00",
+      "observed_value": 76.0,
+      "score": 8.862776067543358
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:42:00+00:00",
+      "window_end": "2025-01-01T08:43:00+00:00",
+      "observed_value": 73.0,
+      "score": 8.323696269698715
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:43:00+00:00",
+      "window_end": "2025-01-01T08:44:00+00:00",
+      "observed_value": 74.0,
+      "score": 8.33155399099251
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:44:00+00:00",
+      "window_end": "2025-01-01T08:45:00+00:00",
+      "observed_value": 85.0,
+      "score": 9.632824941935262
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:45:00+00:00",
+      "window_end": "2025-01-01T08:46:00+00:00",
+      "observed_value": 69.0,
+      "score": 7.427776156698298
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:46:00+00:00",
+      "window_end": "2025-01-01T08:47:00+00:00",
+      "observed_value": 59.0,
+      "score": 6.069335730708936
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:47:00+00:00",
+      "window_end": "2025-01-01T08:48:00+00:00",
+      "observed_value": 73.0,
+      "score": 7.750781617217369
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:48:00+00:00",
+      "window_end": "2025-01-01T08:49:00+00:00",
+      "observed_value": 77.0,
+      "score": 8.136686695496754
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:49:00+00:00",
+      "window_end": "2025-01-01T08:50:00+00:00",
+      "observed_value": 75.0,
+      "score": 7.775385359513906
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:50:00+00:00",
+      "window_end": "2025-01-01T08:51:00+00:00",
+      "observed_value": 65.0,
+      "score": 6.466191256399459
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:51:00+00:00",
+      "window_end": "2025-01-01T08:52:00+00:00",
+      "observed_value": 60.0,
+      "score": 5.796846629905372
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:52:00+00:00",
+      "window_end": "2025-01-01T08:53:00+00:00",
+      "observed_value": 73.0,
+      "score": 7.268835749900459
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:53:00+00:00",
+      "window_end": "2025-01-01T08:54:00+00:00",
+      "observed_value": 63.0,
+      "score": 6.009567354455708
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:54:00+00:00",
+      "window_end": "2025-01-01T08:55:00+00:00",
+      "observed_value": 85.0,
+      "score": 8.483956099660539
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:55:00+00:00",
+      "window_end": "2025-01-01T08:56:00+00:00",
+      "observed_value": 76.0,
+      "score": 7.331283676698033
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:56:00+00:00",
+      "window_end": "2025-01-01T08:57:00+00:00",
+      "observed_value": 74.0,
+      "score": 7.010345729563839
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:57:00+00:00",
+      "window_end": "2025-01-01T08:58:00+00:00",
+      "observed_value": 56.0,
+      "score": 4.920000615229057
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:58:00+00:00",
+      "window_end": "2025-01-01T08:59:00+00:00",
+      "observed_value": 74.0,
+      "score": 6.8643914819197995
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2025-01-08T08:00:00+00:00",
+      "window_end": "2025-01-08T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 48.97236859642055
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2025-01-15T08:00:00+00:00",
+      "window_end": "2025-01-15T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 46.17727813959536
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2025-01-22T08:00:00+00:00",
+      "window_end": "2025-01-22T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 43.801871526134185
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2025-01-29T08:00:00+00:00",
+      "window_end": "2025-01-29T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 41.790879698326755
+    }
+  ],
+  "unattributed_injected_incidents": [
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-27T08:19:00+00:00",
+      "window_end": "2024-11-27T08:20:00+00:00",
+      "observed_value": 14.0,
+      "score": 3.613815163204045
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:08:00+00:00",
+      "window_end": "2024-11-29T23:09:00+00:00",
+      "observed_value": 90.0,
+      "score": -4.393174809392887
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:21:00+00:00",
+      "window_end": "2024-11-29T23:22:00+00:00",
+      "observed_value": 81.0,
+      "score": -4.663479572075042
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:22:00+00:00",
+      "window_end": "2024-11-29T23:23:00+00:00",
+      "observed_value": 96.0,
+      "score": -3.7119030565872535
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:24:00+00:00",
+      "window_end": "2024-11-29T23:25:00+00:00",
+      "observed_value": 85.0,
+      "score": -4.334478813028027
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:28:00+00:00",
+      "window_end": "2024-11-29T23:29:00+00:00",
+      "observed_value": 83.0,
+      "score": -4.354168112048748
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:31:00+00:00",
+      "window_end": "2024-11-29T23:32:00+00:00",
+      "observed_value": 92.0,
+      "score": -3.7541983781009516
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:32:00+00:00",
+      "window_end": "2024-11-29T23:33:00+00:00",
+      "observed_value": 88.0,
+      "score": -3.9612215316082655
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:35:00+00:00",
+      "window_end": "2024-11-29T23:36:00+00:00",
+      "observed_value": 92.0,
+      "score": -3.6590834740859823
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:37:00+00:00",
+      "window_end": "2024-11-29T23:38:00+00:00",
+      "observed_value": 94.0,
+      "score": -3.507681163261341
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:38:00+00:00",
+      "window_end": "2024-11-29T23:39:00+00:00",
+      "observed_value": 86.0,
+      "score": -3.937577353361462
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:41:00+00:00",
+      "window_end": "2024-11-29T23:42:00+00:00",
+      "observed_value": 92.0,
+      "score": -3.530967659382116
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-11-29T23:52:00+00:00",
+      "window_end": "2024-11-29T23:53:00+00:00",
+      "observed_value": 78.0,
+      "score": -4.111156792152408
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-02T13:53:00+00:00",
+      "window_end": "2024-12-02T13:54:00+00:00",
+      "observed_value": 115.0,
+      "score": 3.737053386430508
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-02T13:54:00+00:00",
+      "window_end": "2024-12-02T13:55:00+00:00",
+      "observed_value": 120.0,
+      "score": 4.253337381768857
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2024-12-04T08:00:00+00:00",
+      "window_end": "2024-12-04T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 73.89358343380587
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2024-12-11T08:00:00+00:00",
+      "window_end": "2024-12-11T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 66.58129015933142
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2024-12-18T08:00:00+00:00",
+      "window_end": "2024-12-18T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 60.74382333804863
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-21T18:11:00+00:00",
+      "window_end": "2024-12-21T18:12:00+00:00",
+      "observed_value": 153.0,
+      "score": 3.530224217009578
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-21T18:12:00+00:00",
+      "window_end": "2024-12-21T18:13:00+00:00",
+      "observed_value": 156.0,
+      "score": 3.80382982948
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-21T18:15:00+00:00",
+      "window_end": "2024-12-21T18:16:00+00:00",
+      "observed_value": 161.0,
+      "score": 4.255170980828312
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-21T18:36:00+00:00",
+      "window_end": "2024-12-21T18:37:00+00:00",
+      "observed_value": 163.0,
+      "score": 4.376563932043004
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-21T18:38:00+00:00",
+      "window_end": "2024-12-21T18:39:00+00:00",
+      "observed_value": 156.0,
+      "score": 3.7177976066414513
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2024-12-27T23:02:00+00:00",
+      "window_end": "2024-12-27T23:03:00+00:00",
+      "observed_value": 532980.0,
+      "score": 4.348543597104368
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-27T23:02:00+00:00",
+      "window_end": "2024-12-27T23:03:00+00:00",
+      "observed_value": 62.0,
+      "score": -4.282904446920281
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-27T23:03:00+00:00",
+      "window_end": "2024-12-27T23:04:00+00:00",
+      "observed_value": 79.0,
+      "score": -3.520705898268636
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:04:00+00:00",
+      "window_end": "2024-12-28T18:05:00+00:00",
+      "observed_value": 75.0,
+      "score": -3.737476111723958
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:05:00+00:00",
+      "window_end": "2024-12-28T18:06:00+00:00",
+      "observed_value": 75.0,
+      "score": -3.712382580609137
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:06:00+00:00",
+      "window_end": "2024-12-28T18:07:00+00:00",
+      "observed_value": 77.0,
+      "score": -3.508857609222987
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:07:00+00:00",
+      "window_end": "2024-12-28T18:08:00+00:00",
+      "observed_value": 68.0,
+      "score": -4.287261066520106
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:08:00+00:00",
+      "window_end": "2024-12-28T18:09:00+00:00",
+      "observed_value": 74.0,
+      "score": -3.723928796035192
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:26:00+00:00",
+      "window_end": "2024-12-28T18:27:00+00:00",
+      "observed_value": 61.0,
+      "score": -4.562365023939606
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:38:00+00:00",
+      "window_end": "2024-12-28T18:39:00+00:00",
+      "observed_value": 59.0,
+      "score": -4.519514143935164
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-28T18:39:00+00:00",
+      "window_end": "2024-12-28T18:40:00+00:00",
+      "observed_value": 69.0,
+      "score": -3.679496626528158
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:00:00+00:00",
+      "window_end": "2024-12-30T13:01:00+00:00",
+      "observed_value": 37.0,
+      "score": -4.186566327814975
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:01:00+00:00",
+      "window_end": "2024-12-30T13:02:00+00:00",
+      "observed_value": 38.0,
+      "score": -4.060549455876461
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:02:00+00:00",
+      "window_end": "2024-12-30T13:03:00+00:00",
+      "observed_value": 36.0,
+      "score": -4.218952002359796
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:04:00+00:00",
+      "window_end": "2024-12-30T13:05:00+00:00",
+      "observed_value": 36.0,
+      "score": -4.162192719947468
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:05:00+00:00",
+      "window_end": "2024-12-30T13:06:00+00:00",
+      "observed_value": 35.0,
+      "score": -4.223516330449621
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:06:00+00:00",
+      "window_end": "2024-12-30T13:07:00+00:00",
+      "observed_value": 36.0,
+      "score": -4.0996472737558065
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:07:00+00:00",
+      "window_end": "2024-12-30T13:08:00+00:00",
+      "observed_value": 28.0,
+      "score": -4.799940609000337
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:08:00+00:00",
+      "window_end": "2024-12-30T13:09:00+00:00",
+      "observed_value": 30.0,
+      "score": -4.577324721803627
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:10:00+00:00",
+      "window_end": "2024-12-30T13:11:00+00:00",
+      "observed_value": 34.0,
+      "score": -4.154636065141255
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:11:00+00:00",
+      "window_end": "2024-12-30T13:12:00+00:00",
+      "observed_value": 39.0,
+      "score": -3.6783083116689697
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:12:00+00:00",
+      "window_end": "2024-12-30T13:13:00+00:00",
+      "observed_value": 37.0,
+      "score": -3.8312162023311145
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:13:00+00:00",
+      "window_end": "2024-12-30T13:14:00+00:00",
+      "observed_value": 21.0,
+      "score": -5.2148577648557914
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:14:00+00:00",
+      "window_end": "2024-12-30T13:15:00+00:00",
+      "observed_value": 36.0,
+      "score": -3.854712574257929
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:15:00+00:00",
+      "window_end": "2024-12-30T13:16:00+00:00",
+      "observed_value": 38.0,
+      "score": -3.654129118949328
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:16:00+00:00",
+      "window_end": "2024-12-30T13:17:00+00:00",
+      "observed_value": 36.0,
+      "score": -3.8031432675361674
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:17:00+00:00",
+      "window_end": "2024-12-30T13:18:00+00:00",
+      "observed_value": 38.0,
+      "score": -3.605092235958117
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:19:00+00:00",
+      "window_end": "2024-12-30T13:20:00+00:00",
+      "observed_value": 35.0,
+      "score": -3.817758848996406
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:20:00+00:00",
+      "window_end": "2024-12-30T13:21:00+00:00",
+      "observed_value": 37.0,
+      "score": -3.6220253182460684
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:23:00+00:00",
+      "window_end": "2024-12-30T13:24:00+00:00",
+      "observed_value": 28.0,
+      "score": -4.308365916335907
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:27:00+00:00",
+      "window_end": "2024-12-30T13:28:00+00:00",
+      "observed_value": 35.0,
+      "score": -3.6374532823593433
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:30:00+00:00",
+      "window_end": "2024-12-30T13:31:00+00:00",
+      "observed_value": 30.0,
+      "score": -3.992213689611459
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:31:00+00:00",
+      "window_end": "2024-12-30T13:32:00+00:00",
+      "observed_value": 32.0,
+      "score": -3.8021402169467438
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2024-12-30T13:34:00+00:00",
+      "window_end": "2024-12-30T13:35:00+00:00",
+      "observed_value": 34.0,
+      "score": -3.5846247935166495
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2025-01-01T08:00:00+00:00",
+      "window_end": "2025-01-01T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 56.012767417048416
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:00:00+00:00",
+      "window_end": "2025-01-01T08:01:00+00:00",
+      "observed_value": 93.0,
+      "score": 37.88304829697473
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:01:00+00:00",
+      "window_end": "2025-01-01T08:02:00+00:00",
+      "observed_value": 124.0,
+      "score": 50.63259786691215
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:02:00+00:00",
+      "window_end": "2025-01-01T08:03:00+00:00",
+      "observed_value": 92.0,
+      "score": 36.326406757968805
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:03:00+00:00",
+      "window_end": "2025-01-01T08:04:00+00:00",
+      "observed_value": 102.0,
+      "score": 40.04178427121534
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:04:00+00:00",
+      "window_end": "2025-01-01T08:05:00+00:00",
+      "observed_value": 88.0,
+      "score": 33.75483999663446
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:05:00+00:00",
+      "window_end": "2025-01-01T08:06:00+00:00",
+      "observed_value": 99.0,
+      "score": 36.8471861394375
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:06:00+00:00",
+      "window_end": "2025-01-01T08:07:00+00:00",
+      "observed_value": 82.0,
+      "score": 28.2190845180209
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:07:00+00:00",
+      "window_end": "2025-01-01T08:08:00+00:00",
+      "observed_value": 103.0,
+      "score": 34.29462012153259
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:08:00+00:00",
+      "window_end": "2025-01-01T08:09:00+00:00",
+      "observed_value": 109.0,
+      "score": 34.29779025951595
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:09:00+00:00",
+      "window_end": "2025-01-01T08:10:00+00:00",
+      "observed_value": 94.0,
+      "score": 27.56561665201837
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:10:00+00:00",
+      "window_end": "2025-01-01T08:11:00+00:00",
+      "observed_value": 95.0,
+      "score": 26.55735139554531
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:11:00+00:00",
+      "window_end": "2025-01-01T08:12:00+00:00",
+      "observed_value": 78.0,
+      "score": 20.455130764140954
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:12:00+00:00",
+      "window_end": "2025-01-01T08:13:00+00:00",
+      "observed_value": 88.0,
+      "score": 22.500497253602042
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:13:00+00:00",
+      "window_end": "2025-01-01T08:14:00+00:00",
+      "observed_value": 108.0,
+      "score": 26.961545682781303
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:14:00+00:00",
+      "window_end": "2025-01-01T08:15:00+00:00",
+      "observed_value": 90.0,
+      "score": 21.118075807447095
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:15:00+00:00",
+      "window_end": "2025-01-01T08:16:00+00:00",
+      "observed_value": 85.0,
+      "score": 19.111335838502416
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:16:00+00:00",
+      "window_end": "2025-01-01T08:17:00+00:00",
+      "observed_value": 84.0,
+      "score": 18.234748509536953
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:17:00+00:00",
+      "window_end": "2025-01-01T08:18:00+00:00",
+      "observed_value": 109.0,
+      "score": 23.423271116290437
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:18:00+00:00",
+      "window_end": "2025-01-01T08:19:00+00:00",
+      "observed_value": 100.0,
+      "score": 20.475440872416776
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:19:00+00:00",
+      "window_end": "2025-01-01T08:20:00+00:00",
+      "observed_value": 84.0,
+      "score": 16.31779221939271
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:20:00+00:00",
+      "window_end": "2025-01-01T08:21:00+00:00",
+      "observed_value": 73.0,
+      "score": 13.55853556315821
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:21:00+00:00",
+      "window_end": "2025-01-01T08:22:00+00:00",
+      "observed_value": 85.0,
+      "score": 15.677530260958001
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:22:00+00:00",
+      "window_end": "2025-01-01T08:23:00+00:00",
+      "observed_value": 73.0,
+      "score": 12.8657001541403
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:23:00+00:00",
+      "window_end": "2025-01-01T08:24:00+00:00",
+      "observed_value": 77.0,
+      "score": 13.349419102541145
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:24:00+00:00",
+      "window_end": "2025-01-01T08:25:00+00:00",
+      "observed_value": 92.0,
+      "score": 15.881232122515057
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:25:00+00:00",
+      "window_end": "2025-01-01T08:26:00+00:00",
+      "observed_value": 105.0,
+      "score": 17.83939068289986
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:26:00+00:00",
+      "window_end": "2025-01-01T08:27:00+00:00",
+      "observed_value": 84.0,
+      "score": 13.518191670898954
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:27:00+00:00",
+      "window_end": "2025-01-01T08:28:00+00:00",
+      "observed_value": 77.0,
+      "score": 11.969208847614487
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:28:00+00:00",
+      "window_end": "2025-01-01T08:29:00+00:00",
+      "observed_value": 82.0,
+      "score": 12.57426134163616
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:29:00+00:00",
+      "window_end": "2025-01-01T08:30:00+00:00",
+      "observed_value": 92.0,
+      "score": 13.976225443130819
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:30:00+00:00",
+      "window_end": "2025-01-01T08:31:00+00:00",
+      "observed_value": 63.0,
+      "score": 8.868489918552756
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:31:00+00:00",
+      "window_end": "2025-01-01T08:32:00+00:00",
+      "observed_value": 74.0,
+      "score": 10.5092619911184
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:32:00+00:00",
+      "window_end": "2025-01-01T08:33:00+00:00",
+      "observed_value": 83.0,
+      "score": 11.745126482452577
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:33:00+00:00",
+      "window_end": "2025-01-01T08:34:00+00:00",
+      "observed_value": 86.0,
+      "score": 11.96887207080808
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:34:00+00:00",
+      "window_end": "2025-01-01T08:35:00+00:00",
+      "observed_value": 65.0,
+      "score": 8.50376670171341
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:35:00+00:00",
+      "window_end": "2025-01-01T08:36:00+00:00",
+      "observed_value": 74.0,
+      "score": 9.732438366939622
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:36:00+00:00",
+      "window_end": "2025-01-01T08:37:00+00:00",
+      "observed_value": 78.0,
+      "score": 10.157837902423006
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:37:00+00:00",
+      "window_end": "2025-01-01T08:38:00+00:00",
+      "observed_value": 76.0,
+      "score": 9.682657672807986
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:38:00+00:00",
+      "window_end": "2025-01-01T08:39:00+00:00",
+      "observed_value": 68.0,
+      "score": 8.366706663170078
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:39:00+00:00",
+      "window_end": "2025-01-01T08:40:00+00:00",
+      "observed_value": 68.0,
+      "score": 8.241992045141034
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:40:00+00:00",
+      "window_end": "2025-01-01T08:41:00+00:00",
+      "observed_value": 82.0,
+      "score": 10.078800410313178
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:41:00+00:00",
+      "window_end": "2025-01-01T08:42:00+00:00",
+      "observed_value": 76.0,
+      "score": 9.0731201670006
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:42:00+00:00",
+      "window_end": "2025-01-01T08:43:00+00:00",
+      "observed_value": 73.0,
+      "score": 8.520089802355981
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:43:00+00:00",
+      "window_end": "2025-01-01T08:44:00+00:00",
+      "observed_value": 74.0,
+      "score": 8.524449414468545
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:44:00+00:00",
+      "window_end": "2025-01-01T08:45:00+00:00",
+      "observed_value": 85.0,
+      "score": 9.844983271163965
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:45:00+00:00",
+      "window_end": "2025-01-01T08:46:00+00:00",
+      "observed_value": 69.0,
+      "score": 7.597627239718852
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:46:00+00:00",
+      "window_end": "2025-01-01T08:47:00+00:00",
+      "observed_value": 59.0,
+      "score": 6.213419369508338
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:47:00+00:00",
+      "window_end": "2025-01-01T08:48:00+00:00",
+      "observed_value": 73.0,
+      "score": 7.920720845403208
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:48:00+00:00",
+      "window_end": "2025-01-01T08:49:00+00:00",
+      "observed_value": 77.0,
+      "score": 8.309942028133504
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:49:00+00:00",
+      "window_end": "2025-01-01T08:50:00+00:00",
+      "observed_value": 75.0,
+      "score": 7.939712796043385
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:50:00+00:00",
+      "window_end": "2025-01-01T08:51:00+00:00",
+      "observed_value": 65.0,
+      "score": 6.60710927999294
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:51:00+00:00",
+      "window_end": "2025-01-01T08:52:00+00:00",
+      "observed_value": 60.0,
+      "score": 5.9253201670933136
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:52:00+00:00",
+      "window_end": "2025-01-01T08:53:00+00:00",
+      "observed_value": 73.0,
+      "score": 7.417901548351782
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:53:00+00:00",
+      "window_end": "2025-01-01T08:54:00+00:00",
+      "observed_value": 63.0,
+      "score": 6.137370116142842
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:54:00+00:00",
+      "window_end": "2025-01-01T08:55:00+00:00",
+      "observed_value": 85.0,
+      "score": 8.64628971737657
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:55:00+00:00",
+      "window_end": "2025-01-01T08:56:00+00:00",
+      "observed_value": 76.0,
+      "score": 7.473955690824258
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:56:00+00:00",
+      "window_end": "2025-01-01T08:57:00+00:00",
+      "observed_value": 74.0,
+      "score": 7.146092165139949
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:57:00+00:00",
+      "window_end": "2025-01-01T08:58:00+00:00",
+      "observed_value": 56.0,
+      "score": 5.024520125859462
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-01T08:58:00+00:00",
+      "window_end": "2025-01-01T08:59:00+00:00",
+      "observed_value": 74.0,
+      "score": 6.994290295530087
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:00:00+00:00",
+      "window_end": "2025-01-06T13:01:00+00:00",
+      "observed_value": 189.0,
+      "score": 8.248292488631204
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:01:00+00:00",
+      "window_end": "2025-01-06T13:02:00+00:00",
+      "observed_value": 210.0,
+      "score": 9.664135287343615
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:02:00+00:00",
+      "window_end": "2025-01-06T13:03:00+00:00",
+      "observed_value": 210.0,
+      "score": 9.49812631207755
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:03:00+00:00",
+      "window_end": "2025-01-06T13:04:00+00:00",
+      "observed_value": 204.0,
+      "score": 8.912165012485147
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:04:00+00:00",
+      "window_end": "2025-01-06T13:05:00+00:00",
+      "observed_value": 201.0,
+      "score": 8.561089350801096
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:05:00+00:00",
+      "window_end": "2025-01-06T13:06:00+00:00",
+      "observed_value": 177.0,
+      "score": 6.776092924783854
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:06:00+00:00",
+      "window_end": "2025-01-06T13:07:00+00:00",
+      "observed_value": 183.0,
+      "score": 7.1032570785843845
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:07:00+00:00",
+      "window_end": "2025-01-06T13:08:00+00:00",
+      "observed_value": 225.0,
+      "score": 9.845312061769366
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:08:00+00:00",
+      "window_end": "2025-01-06T13:09:00+00:00",
+      "observed_value": 207.0,
+      "score": 8.478807869822223
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:09:00+00:00",
+      "window_end": "2025-01-06T13:10:00+00:00",
+      "observed_value": 195.0,
+      "score": 7.565467186633246
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:10:00+00:00",
+      "window_end": "2025-01-06T13:11:00+00:00",
+      "observed_value": 207.0,
+      "score": 8.239156779939492
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:11:00+00:00",
+      "window_end": "2025-01-06T13:12:00+00:00",
+      "observed_value": 267.0,
+      "score": 11.945794380589497
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:12:00+00:00",
+      "window_end": "2025-01-06T13:13:00+00:00",
+      "observed_value": 204.0,
+      "score": 7.753489260595789
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:13:00+00:00",
+      "window_end": "2025-01-06T13:14:00+00:00",
+      "observed_value": 168.0,
+      "score": 5.42294702724002
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:14:00+00:00",
+      "window_end": "2025-01-06T13:15:00+00:00",
+      "observed_value": 240.0,
+      "score": 9.780096566426222
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:15:00+00:00",
+      "window_end": "2025-01-06T13:16:00+00:00",
+      "observed_value": 216.0,
+      "score": 8.163635795005991
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:16:00+00:00",
+      "window_end": "2025-01-06T13:17:00+00:00",
+      "observed_value": 210.0,
+      "score": 7.687985382741888
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:17:00+00:00",
+      "window_end": "2025-01-06T13:18:00+00:00",
+      "observed_value": 273.0,
+      "score": 11.28368080243648
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:18:00+00:00",
+      "window_end": "2025-01-06T13:19:00+00:00",
+      "observed_value": 249.0,
+      "score": 9.674267435857917
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:19:00+00:00",
+      "window_end": "2025-01-06T13:20:00+00:00",
+      "observed_value": 237.0,
+      "score": 8.826952111341956
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:20:00+00:00",
+      "window_end": "2025-01-06T13:21:00+00:00",
+      "observed_value": 234.0,
+      "score": 8.520445538861663
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:21:00+00:00",
+      "window_end": "2025-01-06T13:22:00+00:00",
+      "observed_value": 186.0,
+      "score": 5.743147160648773
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:22:00+00:00",
+      "window_end": "2025-01-06T13:23:00+00:00",
+      "observed_value": 228.0,
+      "score": 7.980597371810547
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:23:00+00:00",
+      "window_end": "2025-01-06T13:24:00+00:00",
+      "observed_value": 204.0,
+      "score": 6.571571597142842
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:24:00+00:00",
+      "window_end": "2025-01-06T13:25:00+00:00",
+      "observed_value": 249.0,
+      "score": 8.898346356219452
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:25:00+00:00",
+      "window_end": "2025-01-06T13:26:00+00:00",
+      "observed_value": 213.0,
+      "score": 6.861968263725631
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:26:00+00:00",
+      "window_end": "2025-01-06T13:27:00+00:00",
+      "observed_value": 189.0,
+      "score": 5.527910229785191
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:27:00+00:00",
+      "window_end": "2025-01-06T13:28:00+00:00",
+      "observed_value": 240.0,
+      "score": 8.10683027185219
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:28:00+00:00",
+      "window_end": "2025-01-06T13:29:00+00:00",
+      "observed_value": 270.0,
+      "score": 9.518708416221633
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:29:00+00:00",
+      "window_end": "2025-01-06T13:30:00+00:00",
+      "observed_value": 159.0,
+      "score": 3.7879496893131783
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:30:00+00:00",
+      "window_end": "2025-01-06T13:31:00+00:00",
+      "observed_value": 195.0,
+      "score": 5.558856446932063
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:31:00+00:00",
+      "window_end": "2025-01-06T13:32:00+00:00",
+      "observed_value": 180.0,
+      "score": 4.761290332707042
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:32:00+00:00",
+      "window_end": "2025-01-06T13:33:00+00:00",
+      "observed_value": 210.0,
+      "score": 6.194567036717019
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:33:00+00:00",
+      "window_end": "2025-01-06T13:34:00+00:00",
+      "observed_value": 237.0,
+      "score": 7.439669670528653
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:34:00+00:00",
+      "window_end": "2025-01-06T13:35:00+00:00",
+      "observed_value": 219.0,
+      "score": 6.475454891462315
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:35:00+00:00",
+      "window_end": "2025-01-06T13:36:00+00:00",
+      "observed_value": 207.0,
+      "score": 5.829390134745979
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:36:00+00:00",
+      "window_end": "2025-01-06T13:37:00+00:00",
+      "observed_value": 207.0,
+      "score": 5.768573528521872
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:37:00+00:00",
+      "window_end": "2025-01-06T13:38:00+00:00",
+      "observed_value": 177.0,
+      "score": 4.306683733600085
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:38:00+00:00",
+      "window_end": "2025-01-06T13:39:00+00:00",
+      "observed_value": 216.0,
+      "score": 6.084951162694
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:39:00+00:00",
+      "window_end": "2025-01-06T13:40:00+00:00",
+      "observed_value": 294.0,
+      "score": 9.60756089264958
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:40:00+00:00",
+      "window_end": "2025-01-06T13:41:00+00:00",
+      "observed_value": 216.0,
+      "score": 5.910824257667942
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:41:00+00:00",
+      "window_end": "2025-01-06T13:42:00+00:00",
+      "observed_value": 213.0,
+      "score": 5.713677442168054
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:42:00+00:00",
+      "window_end": "2025-01-06T13:43:00+00:00",
+      "observed_value": 252.0,
+      "score": 7.390009876362476
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:43:00+00:00",
+      "window_end": "2025-01-06T13:44:00+00:00",
+      "observed_value": 222.0,
+      "score": 5.973801394268471
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:44:00+00:00",
+      "window_end": "2025-01-06T13:45:00+00:00",
+      "observed_value": 198.0,
+      "score": 4.864725007155532
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:45:00+00:00",
+      "window_end": "2025-01-06T13:46:00+00:00",
+      "observed_value": 237.0,
+      "score": 6.508409689953583
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:46:00+00:00",
+      "window_end": "2025-01-06T13:47:00+00:00",
+      "observed_value": 204.0,
+      "score": 5.0205422785204625
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:47:00+00:00",
+      "window_end": "2025-01-06T13:48:00+00:00",
+      "observed_value": 225.0,
+      "score": 5.867207851845624
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:48:00+00:00",
+      "window_end": "2025-01-06T13:49:00+00:00",
+      "observed_value": 222.0,
+      "score": 5.67935339821601
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:49:00+00:00",
+      "window_end": "2025-01-06T13:50:00+00:00",
+      "observed_value": 216.0,
+      "score": 5.371316838622605
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:50:00+00:00",
+      "window_end": "2025-01-06T13:51:00+00:00",
+      "observed_value": 198.0,
+      "score": 4.574905479844499
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:51:00+00:00",
+      "window_end": "2025-01-06T13:52:00+00:00",
+      "observed_value": 237.0,
+      "score": 6.140027067422157
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:52:00+00:00",
+      "window_end": "2025-01-06T13:53:00+00:00",
+      "observed_value": 213.0,
+      "score": 5.095761244100819
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:53:00+00:00",
+      "window_end": "2025-01-06T13:54:00+00:00",
+      "observed_value": 234.0,
+      "score": 5.897374911016074
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:54:00+00:00",
+      "window_end": "2025-01-06T13:55:00+00:00",
+      "observed_value": 189.0,
+      "score": 4.034262297916474
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:55:00+00:00",
+      "window_end": "2025-01-06T13:56:00+00:00",
+      "observed_value": 228.0,
+      "score": 5.556734755096094
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:56:00+00:00",
+      "window_end": "2025-01-06T13:57:00+00:00",
+      "observed_value": 216.0,
+      "score": 5.028070251078391
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:57:00+00:00",
+      "window_end": "2025-01-06T13:58:00+00:00",
+      "observed_value": 207.0,
+      "score": 4.630417678504892
+    },
+    {
+      "detector_name": "volume",
+      "window_start": "2025-01-06T13:58:00+00:00",
+      "window_end": "2025-01-06T13:59:00+00:00",
+      "observed_value": 201.0,
+      "score": 4.358682620709725
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2025-01-08T08:00:00+00:00",
+      "window_end": "2025-01-08T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 52.15454706954529
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2025-01-15T08:00:00+00:00",
+      "window_end": "2025-01-15T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 48.86474796497029
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2025-01-22T08:00:00+00:00",
+      "window_end": "2025-01-22T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 46.09587863102613
+    },
+    {
+      "detector_name": "freshness",
+      "window_start": "2025-01-29T08:00:00+00:00",
+      "window_end": "2025-01-29T08:01:00+00:00",
+      "observed_value": 151260.0,
+      "score": 43.7674188858108
+    }
+  ]
+}
