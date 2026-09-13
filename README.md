@@ -166,9 +166,4 @@ See [CLAUDE.md](CLAUDE.md) for the locked stack and the hard rules this
 project is built under, and [DEFENSE.md](DEFENSE.md) for the running log of
 design decisions, alternatives, and tradeoffs behind it.
 
-## Provenance
 
-Portions of this repository are adapted from
-[streaming-lakehouse-lab](https://github.com/DiogoRibeiro7/streaming-lakehouse-lab)
-(MIT). See [PROVENANCE.md](PROVENANCE.md) and
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
