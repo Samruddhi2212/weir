@@ -37,11 +37,13 @@ the buffer clears against something real, then excluded from every
 count.
 """
 import argparse
+import contextlib
 import datetime
 import json
 import statistics
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pyarrow as pa
@@ -426,12 +428,56 @@ def append_trailing_window(conn):
     return window_end
 
 
-def run_detectors(conn):
+PROGRESS_INTERVAL_SECONDS = 30.0
+
+
+@contextlib.contextmanager
+def timed(label, what):
+    """Wall-clock one step and print it. Printed on the way in as well
+    as out, so a step that never finishes is still identifiable."""
+    print(f"  [{label}] {what} ...", flush=True)
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        print(f"  [{label}] {what}: {time.monotonic() - started:.1f}s", flush=True)
+
+
+def progress_reporter(label, detector_name):
+    """A throttled progress(done, total) callback for run_once.
+
+    A contiguous span puts six figures of windows through one run_once
+    call, each in its own transaction. Run 34757520031 spent 4h36m in
+    that loop without printing anything and was killed at the CI
+    ceiling with no way to tell a slow run from a hung one. This prints
+    a rate and an ETA often enough to answer that, rarely enough not to
+    drown the log."""
+    state = {"last": time.monotonic(), "started": time.monotonic()}
+
+    def report(done, total):
+        now = time.monotonic()
+        if now - state["last"] < PROGRESS_INTERVAL_SECONDS and done != total:
+            return
+        state["last"] = now
+        elapsed = now - state["started"]
+        rate = done / elapsed if elapsed else 0.0
+        remaining = (total - done) / rate if rate else float("nan")
+        print(f"  [{label}] {detector_name}: {done}/{total} windows, "
+              f"{rate:.1f}/s, ~{remaining / 60:.1f} min left", flush=True)
+
+    return report
+
+
+def run_detectors(conn, label=""):
     """Every detector, lag buffer intact."""
     return {
-        "volume": run_volume(conn, VOLUME_CONFIG),
-        "freshness": run_freshness(conn, FRESHNESS_CONFIG),
-        f"null_rate_{NULLRATE_COLUMN}": run_nullrate(conn, NULLRATE_COLUMN),
+        "volume": run_volume(
+            conn, VOLUME_CONFIG, progress=progress_reporter(label, "volume")),
+        "freshness": run_freshness(
+            conn, FRESHNESS_CONFIG, progress=progress_reporter(label, "freshness")),
+        f"null_rate_{NULLRATE_COLUMN}": run_nullrate(
+            conn, NULLRATE_COLUMN,
+            progress=progress_reporter(label, f"null_rate_{NULLRATE_COLUMN}")),
     }
 
 
@@ -844,21 +890,44 @@ def main():
             # denominator in the first place.
             populate(args, stream_path, expected, label, allow_late_drop=(label == "injected"))
 
-            reset_detector_state(conn)
-            trailing = append_trailing_window(conn)
-            statuses = run_detectors(conn)
-            real_windows = assert_accounting(conn, trailing, label)
+            # Every post-populate step is timed. Run 34757520031 spent
+            # 4h36m somewhere in this block and died at the CI ceiling
+            # without narrowing it down; a measured probe later put
+            # scoring alone at well under that, so which step actually
+            # dominates is an open question this answers directly
+            # rather than by inference.
+            with timed(label, "reset detector state"):
+                reset_detector_state(conn)
+            with timed(label, "append trailing window"):
+                trailing = append_trailing_window(conn)
+            with timed(label, "score all detectors"):
+                statuses = run_detectors(conn, label)
+            with timed(label, "assert accounting"):
+                real_windows = assert_accounting(conn, trailing, label)
+
+            with timed(label, "collect incidents"):
+                incidents = collect_incidents(conn)
+            with timed(label, "bucket sample counts"):
+                bucket_samples = bucket_sample_counts(conn)
+            with timed(label, "landed row total"):
+                landed_rows = landed_row_total(conn, trailing)
+            with timed(label, "scored window counts"):
+                scored_windows = sum(
+                    c for _, status, c in scored_window_counts(conn) if status == "scored"
+                )
+            with timed(label, "warmed bucket count"):
+                warmed_buckets = warmed_bucket_count(conn)
+            with timed(label, "clean event-time hours"):
+                event_time_hours = clean_event_time_hours(conn, trailing)
 
             phases[label] = {
-                "incidents": collect_incidents(conn),
-                "bucket_samples": bucket_sample_counts(conn),
-                "landed_rows": landed_row_total(conn, trailing),
-                "scored_windows": sum(
-                    c for _, status, c in scored_window_counts(conn) if status == "scored"
-                ),
+                "incidents": incidents,
+                "bucket_samples": bucket_samples,
+                "landed_rows": landed_rows,
+                "scored_windows": scored_windows,
                 "real_windows": real_windows,
-                "warmed_buckets": warmed_bucket_count(conn),
-                "event_time_hours": clean_event_time_hours(conn, trailing),
+                "warmed_buckets": warmed_buckets,
+                "event_time_hours": event_time_hours,
                 "statuses": {k: len(v) for k, v in statuses.items()},
             }
             stream_path.unlink(missing_ok=True)
