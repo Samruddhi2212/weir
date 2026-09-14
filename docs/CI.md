@@ -33,6 +33,8 @@ default; they exist, but only execute when someone dispatches them.
 | `replay-verify.yml` | `replay_producer.py` - timestamps, compression ratio, resume seam | Downloads a real ~59MB dataset and does three Kafka round trips; V4 wants this dispatched 5x, not trusted on one pass |
 | `exactly-once.yml` | Kafka -> Flink -> Iceberg exactly-once delivery + TaskManager recovery | `verify_recovery.sh` SIGKILLs a running container - destructive, has no place in a gate that runs on every push |
 | `volume-detector-verify.yml` | The volume detector's real-data accounting (Part 4.2/4.3) - every real window accounted for, the real DST fall-back hour excluded, zero false `scored` rows | Needs the full Kafka/Postgres/Flink stack plus a real ~59MB month download (reuses `verify_metrics_job.py`'s own population step, DEFENSE.md #48) - same cost profile as `metrics-job-verify.yml`, same reason it's manual |
+| `benchmark.yml` | Nothing - it *measures*. Clean and injected contiguous replays through the full stack, producing the numbers the README publishes (Part 5) | The heaviest job here by a wide margin: three months of TLC data, two full replays, and two full scoring passes. Manual because it costs hours and because hard rule 12 says its output only lands when someone actually ran it |
+| `scoring-probe.yml` | Nothing - it *sizes*. Times detector scoring against a directly-seeded `window_metrics`, isolated from replay | An instrument for choosing `benchmark.yml`'s span, not a gate. Postgres-only and quick, but it asserts nothing, so the merge rule below does not apply to it |
 
 ## Merge rule
 
