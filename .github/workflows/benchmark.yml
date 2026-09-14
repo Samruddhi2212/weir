@@ -59,8 +59,16 @@ jobs:
           docker compose exec -T postgres psql -U weir -d weir_catalog \
             < reliability/store/incidents_schema.sql
       - name: Download the months the contiguous span covers
-        # 12 contiguous weeks at 0.85 warmup = ~10.2 weekly samples per
-        # bucket (612 observations vs the 480 floor) before injections start.
+        # 10 contiguous weeks at 0.85 warmup = 8.5 weekly samples per
+        # bucket (510 observations vs the 480 floor) before injections
+        # start. 12 weeks would give 10.2 samples and was tried first
+        # (run 34757520031), but it does not fit the ceiling: measured
+        # replay is ~1.2h per phase and measured scoring ~1.33h per
+        # phase, and two phases of that leave under an hour of slack
+        # for slice loading, the two stream parquets, and the accounting
+        # reads. 10 weeks is the shortest span that still clears the
+        # 480-observation floor, which is why it is the fallback rather
+        # than something shorter.
         run: |
           for MONTH in 2024-10 2024-11 2024-12; do
             python ingestion/replay/download_tlc_data.py --year-month "$MONTH" --output-dir data/tlc
@@ -71,7 +79,7 @@ jobs:
             --input data/tlc/yellow_tripdata_2024-10.parquet \
                     data/tlc/yellow_tripdata_2024-11.parquet \
                     data/tlc/yellow_tripdata_2024-12.parquet \
-            --span-weeks 12 \
+            --span-weeks 10 \
             --warmup-fraction 0.85 \
             --populate-timeout 7200 \
             --bootstrap-server localhost:${KAFKA_EXTERNAL_PORT:-29092}
