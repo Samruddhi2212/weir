@@ -14,15 +14,22 @@ on:
   workflow_dispatch:
     inputs:
       windows:
-        description: "Consecutive one-minute windows to seed and score"
+        description: "Consecutive one-minute windows to seed and score (120960 = 12 weeks)"
         required: false
         default: "20000"
+      settings:
+        description: "Comma-separated synchronous_commit values to measure"
+        required: false
+        default: "on"
 
 jobs:
   probe:
     name: Time detector scoring against a seeded window_metrics
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # A full 12-week probe is ~120960 windows x 3 detectors at the
+    # measured rate, plus seeding 8M column_metrics rows. Sized to let
+    # that finish rather than to the 20000-window default.
+    timeout-minutes: 200
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -62,6 +69,7 @@ jobs:
         run: |
           python -u scripts/probe_scoring_throughput.py \
             --windows "${{ github.event.inputs.windows }}" \
+            --settings "${{ github.event.inputs.settings }}" \
             --port "${POSTGRES_PORT:-5432}"
       - name: Show logs on failure
         if: failure()
