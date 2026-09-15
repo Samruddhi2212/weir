@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from reliability.freshness.config import DEFAULT_CONFIG
-from reliability.volume.adapter import process_window, register_detector
+from reliability.volume.adapter import process_window, register_detector, release_snapshot
 from reliability.volume.run import to_naive_local, to_utc_instant
 
 
@@ -75,6 +75,8 @@ def fetch_eligible_windows(conn, config, assume_no_more_arrivals=False):
             ).total_seconds()
             results.append((window_start_naive, window_end_naive, gap_seconds))
         prev = window_end_naive
+
+    release_snapshot(conn)
 
     if not results or assume_no_more_arrivals:
         return results

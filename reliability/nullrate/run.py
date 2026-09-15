@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from reliability.nullrate.config import config_for_column
-from reliability.volume.adapter import process_window, register_detector
+from reliability.volume.adapter import process_window, register_detector, release_snapshot
 from reliability.volume.run import to_naive_local, to_utc_instant
 
 
@@ -55,6 +55,8 @@ def fetch_eligible_windows(conn, config, column_name, assume_no_more_arrivals=Fa
         (window_start, window_end, null_count / row_count)
         for window_start, window_end, null_count, row_count in rows
     ]
+
+    release_snapshot(conn)
 
     if not results or assume_no_more_arrivals:
         return results

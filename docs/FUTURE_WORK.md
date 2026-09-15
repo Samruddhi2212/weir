@@ -168,3 +168,14 @@ directories or files exist for these.
   invisible. Measuring it needs a contiguous replay long enough to warm a
   bucket without sampling gaps, which is a much heavier run than the
   current one.
+
+- **RESOLVED (root cause found, fixed): benchmark runtime grew with
+  window count.** Runs 34757520031 and 34885328884 were both killed at
+  the CI ceiling. Cause: `fetch_eligible_windows` left its read
+  transaction open, so `process_window`'s `conn.transaction()` nested as
+  a SAVEPOINT and every window accumulated in one never-committed
+  transaction, pushing Postgres past its 64-subtransaction cache. Scoring
+  decayed from ~172/s to ~14/s and reset at each detector boundary, which
+  is what identified it. Fixed by `adapter.release_snapshot`, which also
+  restores the per-window crash resumability `process_window` documents.
+  Full account in DEFENSE.md #55.

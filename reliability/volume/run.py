@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 # that already put the repo root on sys.path).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from reliability.volume.adapter import process_window, register_detector
+from reliability.volume.adapter import process_window, register_detector, release_snapshot
 from reliability.volume.config import DEFAULT_CONFIG
 
 
@@ -54,7 +54,10 @@ def fetch_eligible_windows(conn, config, assume_no_more_arrivals=False):
     (DEFENSE.md #51) - only correct when the caller genuinely knows no
     further writes are coming for this range, e.g. verifying against
     an already-fully-loaded historical month. The default (False)
-    preserves live-polling's write-order protection unchanged."""
+    preserves live-polling's write-order protection unchanged.
+
+    Ends its own transaction before returning - see release_snapshot.
+    """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT last_processed_window_end FROM weir_incidents.detector_progress "
@@ -74,6 +77,8 @@ def fetch_eligible_windows(conn, config, assume_no_more_arrivals=False):
             (frontier_naive_local,),
         )
         rows = cur.fetchall()
+
+    release_snapshot(conn)
 
     if not rows or assume_no_more_arrivals:
         return rows

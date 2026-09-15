@@ -59,27 +59,45 @@ jobs:
           docker compose exec -T postgres psql -U weir -d weir_catalog \
             < reliability/store/incidents_schema.sql
       - name: Download the months the contiguous span covers
-        # 10 contiguous weeks at 0.85 warmup = 8.5 weekly samples per
-        # bucket (510 observations vs the 480 floor) before injections
-        # start. 12 weeks would give 10.2 samples and was tried first
-        # (run 34757520031), but it does not fit the ceiling: measured
-        # replay is ~1.2h per phase and measured scoring ~1.33h per
-        # phase, and two phases of that leave under an hour of slack
-        # for slice loading, the two stream parquets, and the accounting
-        # reads. 10 weeks is the shortest span that still clears the
-        # 480-observation floor, which is why it is the fallback rather
-        # than something shorter.
+        # 12 contiguous weeks at 0.85 warmup = 10.2 weekly samples per
+        # bucket (612 observations vs the 480 floor) before injections
+        # start.
+        #
+        # Runs 34757520031 (12w) and 34885328884 (10w) were both killed
+        # at the ceiling, but not because the span was too long: every
+        # window was being processed as a SAVEPOINT inside one
+        # never-committed transaction, so per-window cost grew with the
+        # number of windows already done (~172/s falling to ~14/s, and
+        # resetting at each detector boundary). Fixed in
+        # adapter.release_snapshot. 10 weeks was the fallback while that
+        # was unexplained; with a flat rate the longer span fits and
+        # buys the better baseline maturity, so it goes back to 12.
         run: |
           for MONTH in 2024-10 2024-11 2024-12; do
             python ingestion/replay/download_tlc_data.py --year-month "$MONTH" --output-dir data/tlc
           done
       - name: Run the benchmark
+        # The sampler runs concurrently and is started first so it
+        # captures the whole run, including whatever happens in the
+        # stretch that went silent for 4h36m in run 34757520031. It is
+        # backgrounded inside this step rather than given its own, so
+        # the runner never has to keep a process alive across steps.
+        # If the job is killed at the ceiling neither trap nor kill
+        # fires, which is fine: the log is written line-buffered as it
+        # goes and the upload below is if: always().
         run: |
+          python -u scripts/sample_pg_activity.py \
+            --out pg-activity.log \
+            --interval 5 \
+            --port "${POSTGRES_PORT:-5432}" &
+          SAMPLER_PID=$!
+          trap 'kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+
           python -u benchmarks/run_benchmark.py \
             --input data/tlc/yellow_tripdata_2024-10.parquet \
                     data/tlc/yellow_tripdata_2024-11.parquet \
                     data/tlc/yellow_tripdata_2024-12.parquet \
-            --span-weeks 10 \
+            --span-weeks 12 \
             --warmup-fraction 0.85 \
             --populate-timeout 7200 \
             --bootstrap-server localhost:${KAFKA_EXTERNAL_PORT:-29092}
@@ -89,6 +107,13 @@ jobs:
         with:
           name: benchmark-results
           path: benchmarks/results/*.json
+          if-no-files-found: warn
+      - name: Upload the Postgres activity log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-activity
+          path: pg-activity.log
           if-no-files-found: warn
       - name: Show logs on failure
         if: failure()

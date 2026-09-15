@@ -3349,3 +3349,64 @@ increasing, so sorting by it returns the input order), so GradualDelay
 models the observable consequence instead - late events dropped once
 the ramp crosses the 270s watermark bound. That is the honest version:
 under the bound the pipeline genuinely does absorb delay invisibly.
+
+## 55. Every detector window was a SAVEPOINT inside one never-committed transaction, making per-window cost grow with window count
+
+`process_window` opens `with conn.transaction():` per window, and its
+docstring claims "one window, one transaction... a crash partway rolls
+back cleanly and the window is simply reprocessed next run." That was
+false on the actual call path, and the way it was false only became
+visible at scale.
+
+`fetch_eligible_windows` runs `cur.execute` on a connection created with
+`autocommit=False`. psycopg opens a transaction on the first execute and
+does not close it. `conn.transaction()` nests as a SAVEPOINT when a
+transaction is already open, so the scoring loop's real shape was one
+transaction containing N savepoints, not N transactions. Postgres caches
+64 subtransactions per backend and falls back to the `pg_subtrans` SLRU
+beyond that, so the cost of each window grew with the number of windows
+already processed in the same transaction.
+
+**How it was found, since the order matters.** Two plausible
+explanations were measured first and both came back flat:
+`synchronous_commit=off` gave 1.00x, and a 283MB database against
+Postgres' 128MB default `shared_buffers` scored marginally *faster* than
+a 20MB one. That first result was the real clue - a workload genuinely
+committing 60,000 transactions should care about fsync, and one that
+does not care is probably not committing. Progress instrumentation added
+to the scoring loop then showed the decay directly (run 34885328884):
+~172/s over the first few thousand windows, ~14/s by 50,000, and - the
+decisive detail - **resetting to ~172/s at each detector boundary**.
+Database growth and table bloat accumulate monotonically across a run
+and cannot reset. A per-transaction cost can, because each detector's
+`run_once` opens a fresh one.
+
+Two full benchmark runs were killed at the CI ceiling before this was
+understood, and the span was cut from 12 weeks to 10 as a workaround for
+what was assumed to be an unaffordably long replay. The replay was never
+the problem: it finished in 1h12m.
+
+**Fix:** `adapter.release_snapshot(conn)` ends the fetch's read-only
+transaction before the write loop begins, called from all three
+detectors' `fetch_eligible_windows`. `rollback`, not `commit` - the
+transaction only read, and that read is already documented as an
+efficiency filter whose staleness is harmless. It then asserts
+`transaction_status == IDLE` and raises if not, because the fix is one
+line whose absence is invisible: the broken version produced *correct
+scores*, just slowly and without the resumability the design promised.
+
+**Rejected alternative:** batching windows per transaction in the
+benchmark path. It would have recovered the speed while leaving the
+documented per-window durability boundary wrong, and it would have been
+a benchmark-only code path diverging from what ships - measuring
+something other than the system. Ending the read transaction restores
+the design that DEFENSE #45 already specified rather than adding a
+second one.
+
+**What this says about the guarantee, not just the speed.** The
+correctness claim was never exercised. Nothing in the test suite ran a
+detector against a live database and then killed it mid-loop, so a
+promise about crash recovery went unverified for as long as it existed.
+The scores were right the whole time, which is exactly why this
+survived: a wrong performance characteristic and a wrong durability
+boundary can both hide behind correct output.
