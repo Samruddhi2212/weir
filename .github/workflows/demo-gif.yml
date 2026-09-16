@@ -38,9 +38,11 @@ jobs:
           pip install pyarrow
           pip install -r reliability/volume/requirements.txt
           pip install "asciinema==2.4.0"
-          AGG_VERSION=$(curl -fsSL https://api.github.com/repos/asciinema/agg/releases/latest \
-            | python -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
-          echo "agg version: $AGG_VERSION"
+          # Pinned, not resolved from /releases/latest. That lookup is an
+          # unauthenticated GitHub API call from Actions and came back 403
+          # rate-limited on the second run of this workflow - and a
+          # mutable "latest" is the thing C4/E2 already forbid elsewhere.
+          AGG_VERSION=v1.9.0
           curl -fsSL -o /usr/local/bin/agg \
             "https://github.com/asciinema/agg/releases/download/${AGG_VERSION}/agg-x86_64-unknown-linux-gnu"
           chmod +x /usr/local/bin/agg
