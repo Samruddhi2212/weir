@@ -43,9 +43,11 @@ section specifically.
 
 ## CI
 
-Two tiers: what runs automatically on push/PR, and five
-`workflow_dispatch`-only verification workflows that don't. See
-[docs/CI.md](docs/CI.md) for the full list and why each one is manual.
+Two tiers: what runs automatically on push/PR, and the
+`workflow_dispatch`-only workflows that don't. See
+[docs/CI.md](docs/CI.md) for the full list and why each one is manual -
+kept uncounted here on purpose, because the count drifted stale once
+already.
 
 - **C6** — A `workflow_dispatch`-only verification covering a branch's
   changes must be dispatched and green before that branch merges to
