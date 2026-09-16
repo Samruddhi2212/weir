@@ -6,6 +6,17 @@ name: Metrics Store Schema Verification
 on:
   workflow_dispatch: {}
 
+# docker-compose.yml requires WEIR_S3_ACCESS_KEY/WEIR_S3_SECRET_KEY with
+# no default (a guessable default is worse than a required variable), and
+# compose evaluates interpolation over the whole file - so `up`, `ps`,
+# `logs` and `down` all need them, even in jobs that never touch S3.
+# These are a throwaway local identity for an ephemeral container:
+# SeaweedFS creates the identity from these same values at runtime, so
+# any self-consistent pair works. Not a credential.
+env:
+  WEIR_S3_ACCESS_KEY: weir-local-ci
+  WEIR_S3_SECRET_KEY: weir-local-ci-no-secret-needed
+
 jobs:
   verify:
     name: Apply reliability/store/schema.sql and verify it landed
@@ -44,7 +55,18 @@ jobs:
         run: |
           actual_tables="$(docker compose exec -T postgres psql -t -A -U weir -d weir_catalog -c \
             "SELECT table_name FROM information_schema.tables WHERE table_schema = 'weir_metrics' ORDER BY table_name;" | tr -d '\r')"
-          expected_tables="$(printf 'column_metrics\nwindow_metrics')"
+          # window_metrics_wide was added to schema.sql for the trigger
+          # fan-out (DEFENSE.md #50) and this list was never updated, so
+          # this check had been failing since then - unnoticed, because a
+          # dispatch-only verification nobody dispatches rots silently.
+          # That is the failure mode C6 exists for, found when an
+          # unrelated branch dispatched it.
+          #
+          # Only the two base tables get column-level assertions below.
+          # window_metrics_wide is trigger-populated and its shape is
+          # exercised end to end by metrics-job-verify.yml, which runs
+          # the Flink job that fires the trigger.
+          expected_tables="$(printf 'column_metrics\nwindow_metrics\nwindow_metrics_wide')"
           if [ "$actual_tables" != "$expected_tables" ]; then
             echo "FAIL: expected tables [$expected_tables], got [$actual_tables]"
             exit 1

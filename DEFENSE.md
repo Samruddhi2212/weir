@@ -768,12 +768,24 @@ requests, full stop.
 
 1. Bake a static `-s3.config` JSON identity file into the image or a
    config mount, with credentials matching `WEIR_S3_ACCESS_KEY`/
-   `WEIR_S3_SECRET_KEY`'s defaults. Rejected: this repeats the exact
+   `WEIR_S3_SECRET_KEY`. Rejected: this repeats the exact
    mistake `smoke_step5.sql`'s sentinel-token approach was built to avoid
    (DEFENSE.md #10/#12) - a real credential value (even a local-dev
-   default) sitting in a committed file, now duplicated in a second
+   one) sitting in a committed file, now duplicated in a second
    place, with no substitution mechanism keeping the two in sync if the
-   default ever changes.
+   value ever changes.
+
+   Addendum: those two variables originally *did* carry literal fallback
+   defaults, in the `${VAR:-literal}` form, in five places - the secret's
+   default being a guessable placeholder word. (Not quoted here: the
+   string itself is gone from the working tree, and a docs mention would
+   put it straight back. `git log` has it if the exact value ever
+   matters.) That
+   was the same mistake one step removed - the indirection was right, but
+   a default anyone reading the repo already knows is worse than a
+   variable the caller has to set, because a misconfigured run succeeds
+   silently against a known credential instead of failing at startup.
+   Both are now required with no default everywhere they are read.
 2. Generate the identity file at container startup from
    `WEIR_S3_ACCESS_KEY`/`WEIR_S3_SECRET_KEY`, via a shell-wrapped
    `command:` override in `docker-compose.yml` (`sh -c` writing the JSON
