@@ -72,7 +72,11 @@ jobs:
             sha256sum /opt/flink/lib/*.jar
           '
       - name: Run tests (unit + integration)
-        run: pytest -q tests/
+        # -rs: report every skip with its reason. Without it the summary
+        # is just a count, and a test that quietly skipped in CI is
+        # indistinguishable from one that ran - which matters most for
+        # the tests that guard a claim rather than compute a value.
+        run: pytest -q -rs tests/
       - name: Show service logs on failure
         if: failure()
         run: docker compose logs
