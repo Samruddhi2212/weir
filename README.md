@@ -23,11 +23,11 @@ newest file in `benchmarks/results/*.json` — never edited by hand. CI fails
 if this block doesn't match a fresh regeneration.
 
 <!-- BENCHMARK:BEGIN -->
-Run: `20260913T011848Z.json` (2026-09-13T01:18:48.259626+00:00)
+Run: `20260915T213038Z.json` (2026-09-15T21:30:38.325502+00:00)
 
 | Scenario | Detected | Latency (event time) |
 |---|---|---|
-| volume_partition_degradation | yes | 36235s |
+| volume_partition_degradation | yes | 210s |
 | freshness_gradual_delay | no | n/a |
 | nullrate_slow_creep | no | n/a |
 | duplicate_event_storm | no (expected miss) | n/a |
@@ -39,23 +39,12 @@ Run: `20260913T011848Z.json` (2026-09-13T01:18:48.259626+00:00)
 |---|---|
 | Scenarios flagged, all (incl. expected misses) | 1/7 (14.2857%) |
 | Scenarios flagged, targeted only | 1/3 (33.3333%) |
-| Spurious incidents per scored window, clean replay | 126/6582 (1.9143%) |
-| Of those, at a band boundary (sampling artifact) | 11 |
-| Median / p95 time to flag (event time) | 36235s / 36235s |
-| Warmed buckets across 4 bands | 12 |
-| Clean event-time hours covered | 2919.92 |
-| Unattributed incidents, injected replay | 180 |
-
-Across 5 runs of the same input and code:
-
-| Measure | Across runs |
-|---|---|
-| Scenarios flagged, all | 1/7 in all 5 |
-| Scenarios flagged, targeted only | 1/3 in all 5 |
-| Spurious incidents per scored window | 126/6582 in all 5 |
-| Warmed buckets | 12 in all 5 |
-| Median time to flag (event time) | 36235 .. 345715, 9.5x |
-| Unattributed incidents, injected replay | 180 .. 283, 1.6x |
+| Spurious incidents per scored window, clean replay | 1782/120489 (1.4790%) |
+| Weekly samples per bucket (median, lowest detector) | 12.0 |
+| Median / p95 time to flag (event time) | 210s / 210s |
+| Warmed buckets over a contiguous 12.0-week span | 504 |
+| Clean event-time hours covered | 2015.92 |
+| Unattributed incidents, injected replay | 3291 |
 <!-- BENCHMARK:END -->
 
 ### How to read the table above
@@ -68,52 +57,73 @@ to follow it. They sit in the denominator on purpose. A detection figure
 computed only over failures the detectors were built for would not mean
 anything.
 
-Four limitations, each of which changes how a line above should be read:
+Four readings, each of which changes how a line above should be read:
 
-1. **What's reproducible and what isn't, across 5 runs of identical input
-   and code.** Which scenarios get flagged, the spurious-incident count
-   (identical down to the individual incident), warmed buckets and covered
-   hours were the same in all five. Time to flag was not: it is *bimodal*,
-   landing on one of exactly two values 9.5x apart, never in between. The
-   cause is late arrival — three runs lost ~19,270 events to the watermark
-   and two lost none, from the same input, because whether a late record
-   beats the watermark is a race between replay pacing and Flink's
-   progress. That single difference drives the entire spread.
-2. **The freshness row is not a valid measurement of the freshness
-   detector.** To warm an 8-week baseline affordably, the benchmark
-   replays four `(weekday, hour)` bands rather than continuous time. That
-   leaves ~42-hour gaps between band occurrences, and the freshness
-   detector's entire signal *is* the gap between windows — so its baseline
-   learns that 42-hour gaps are normal, and a real multi-minute gap is
-   invisible against it. Its miss here is an artifact of how the data was
-   sampled, not evidence about the detector.
-3. **The faster time-to-flag is an artifact, and the slower one is the
-   honest figure.** The two modes are not noise around a true value. In
-   the runs that lost events to late arrival, the loss *itself* produced a
-   volume anomaly inside the scenario's window — fewer rows than the
-   baseline expects looks the same whether a partition degraded or the
-   watermark dropped records. Those runs flag earlier for a reason that
-   has nothing to do with the injected failure. The runs that lost nothing
-   flag on the partition degradation alone, at the larger value, and that
-   is the figure to read as this scenario's actual time to flag. Both are
-   also quantised to band occurrences (detection can only land in a
-   sampled hour), so both are shaped by sampling on top of that.
-4. **The spurious-incident figure mixes two different things.** Of the
-   126, nine are the band-boundary artifact described above; the other 117
-   are the volume detector firing on genuine traffic variation in real
-   data. Only the latter is a statement about detector quality.
+1. **This is one run, and variance across runs is unmeasured.** V4 in
+   CLAUDE.md normally requires five clean runs before a result counts,
+   and it is relaxed here on purpose: the pipeline is deterministic given
+   the same input, so repeating it re-verifies one scenario five times
+   rather than sampling a distribution. Five earlier runs under a
+   superseded sampling method bore that out — scenarios flagged, the
+   spurious-incident count and the warmed-bucket count came back
+   identical in all five. Two figures did move, both because whether a
+   late record beats the watermark is a race between replay pacing and
+   Flink's progress: time to flag, and the unattributed-incident count.
+   Those are the two rows above most likely to shift on a rerun, and
+   nobody has measured by how much under contiguous replay.
 
-The honest summary: one targeted failure was caught, one was missed for a
-reason we can explain (below), and one could not be measured at all under
-this sampling. Nothing was tuned to produce these numbers — CLAUDE.md
-hard rule 3 forbids it, and no detector was modified after seeing them.
+2. **Both misses are confirmed, with numbers — not explained away.** The
+   runner records the strongest score each detector reached inside each
+   scenario's declared span, against the fixed threshold of 3.5:
 
-**Why `nullrate_slow_creep` was missed** — candidate explanation, not a
-confirmed one: `passenger_count`'s real null rate in this dataset is both
-high and variable (one inspected window ran 25 nulls in 132 rows), so the
-bucket's tracked dispersion is wide, and a creep to 60% may simply not
-reach 3.5 sigma-equivalents against it. Confirming that needs the
-per-window baseline state, which this run didn't retain.
+   | Scenario | Windows scored in span | Strongest score |
+   |---|---|---|
+   | volume_partition_degradation | 2177 | **5.32** → flagged |
+   | freshness_gradual_delay | 763 | **0.01** |
+   | nullrate_slow_creep | 2540 | **0.93** |
+
+   Every window in every span came back `scored`, none
+   `insufficient_baseline`. The baselines were warm and the detectors did
+   look at the data, so these are real misses rather than windows that
+   were never measured. That distinction is the whole reason the status is
+   recorded per window.
+
+3. **The freshness miss is a design limitation, and a specific one.**
+   Its strongest score was 0.01 — effectively zero deviation, not a near
+   miss. The detector's signal is the gap between consecutive
+   `window_metrics` rows. The scenario delays events until they cross the
+   270s watermark bound and get dropped. But as long as *some* events
+   still land in each minute, windows keep closing once a minute and the
+   arrival gap never changes. A delay failure that thins a stream without
+   stopping it is invisible to a window-gap detector, by construction.
+   This is the honest cost of choosing window gap as the freshness signal
+   over event lateness, which was chosen because the lateness columns are
+   never populated by the current pipeline (DEFENSE.md #52) — a real
+   tradeoff, now with a measured consequence attached to it.
+
+4. **The injected phase raised more unattributable incidents than the
+   clean phase did** (3291 against 1782), and that is expected rather
+   than alarming. Injection deliberately drops events — 101,856 of
+   10,618,427, within the 324,528 the scenarios declare they may lose —
+   and a drop looks to the volume detector exactly like the volume
+   anomaly it exists to catch, including outside any scenario's span.
+   Those incidents are counted and reported rather than filtered, because
+   filtering them would need per-window expected-versus-landed accounting
+   the runner does not do yet (docs/FUTURE_WORK.md).
+
+The honest summary: one targeted failure was caught, and two were missed
+for reasons now measured rather than hypothesised. Nothing was tuned to
+produce these numbers — CLAUDE.md hard rule 3 forbids it, and no detector
+was modified after seeing them.
+
+**Why `nullrate_slow_creep` was missed** — confirmed, with the per-window
+baseline state this time: the creep to a 60% null rate reached a strongest
+score of 0.93 against the 3.5 threshold, about a quarter of the way there.
+`passenger_count`'s real null rate in this dataset is both high and
+variable, so the bucket's tracked dispersion is wide enough to absorb the
+creep. A detector scoring the *trend* rather than each window's deviation
+would catch this; this one scores deviation, and a slow creep is what that
+design is worst at.
 
 ### Limitations of the method
 
@@ -188,15 +198,85 @@ metrics from Postgres:
 Each has a dev trigger in `incidents/dev/` for a fast local loop, and a
 dispatch-only CI workflow that runs it against a real month of TLC data.
 The benchmark harness (`benchmarks/run_benchmark.py`, with the failure
-catalog in `incidents/benchmark/`) is built and has produced the five runs
-reported above. [docs/demo.md](docs/demo.md) is a 60-second walkthrough of
-one detector firing, end to end.
+catalog in `incidents/benchmark/`) is built, and the run reported above
+replays a contiguous 12-week slice of real TLC data twice — once clean to
+get a spurious-incident denominator, once with the catalog injected.
+[docs/demo.md](docs/demo.md) is a 60-second walkthrough of one detector
+firing, end to end.
 
 Lineage is still declared rather than runtime-emitted (below), and the
 triage agent, Terraform and dashboards remain out of scope.
 
 See [docs/FUTURE_WORK.md](docs/FUTURE_WORK.md) for what's explicitly out of
 Sprint 1 scope, and why.
+
+## Design decisions: a correctness guarantee that was silently void
+
+The full log of design decisions is in [DEFENSE.md](DEFENSE.md). This one
+is here because it is the most interesting thing in the repository, and
+because of how it was found.
+
+Each detector writes one window in one transaction. The rationale is
+ordinary: a crash partway through a batch should roll back cleanly and
+leave that single window to be reprocessed next run, exactly once, with
+`scored_windows`' primary key rejecting a genuine double-attempt. That
+was written down, reviewed, and relied on.
+
+It was also false, for as long as it was documented.
+
+The function that fetches eligible windows runs a query on a connection
+created with `autocommit=False`. psycopg opens a transaction on the first
+statement and does not close it, and psycopg's `transaction()` context
+manager **nests as a SAVEPOINT when a transaction is already open**. So
+the real shape of the scoring loop was not N transactions. It was one
+transaction containing N savepoints, committing nothing until the very
+end. A crash would have discarded the entire run, not one window.
+
+**Every score it produced was correct.** That is why it survived review:
+the bug had no effect on output, only on durability — and on speed, which
+is how it eventually surfaced.
+
+Two benchmark runs were killed at the six-hour CI ceiling. The natural
+reading was that the replay was simply too long, and the contiguous span
+was cut from twelve weeks to ten to compensate. That was wrong: the
+replay took 1h12m. The time was going into scoring, and two plausible
+explanations were measured before anything was changed. Turning off
+`synchronous_commit` made no difference whatsoever — 1.00x. Running
+against a database several times larger than Postgres' buffer pool made
+it marginally *faster*. Both hypotheses were dead.
+
+The flat `synchronous_commit` result was the actual clue. A loop
+committing sixty thousand transactions should care about whether commits
+are flushed to disk. One that does not care is probably not committing.
+
+Adding progress reporting to the scoring loop settled it. The scoring
+rate decayed steadily — starting near 172 windows/s and reaching about 14
+— and, decisively, **reset to full speed at every detector boundary**:
+171.6, then 172.6, then 161.5. Table bloat and database growth accumulate
+monotonically across a run and cannot reset. A cost that scales with the
+number of savepoints in the current transaction resets exactly when a new
+transaction begins, which is what each detector's fetch was doing.
+Postgres caches 64 subtransactions per backend and spills to an on-disk
+structure past that, so each window was paying for every window before it.
+
+The fix ends the fetch's read-only transaction before the write loop
+starts. It is one line per detector. The rejected alternative — batching
+windows per transaction only in the benchmark — would have recovered the
+speed while leaving the documented per-window durability boundary wrong,
+and would have made the benchmark measure a code path that does not ship.
+
+Two things are worth taking from this. First, a performance
+investigation found a correctness defect, because the two had the same
+root cause; the speed was the only symptom the bug was willing to show.
+Second, and more useful: nothing in the test suite had ever killed a
+detector mid-loop, so a promise about crash recovery went unverified for
+its entire life. **An untested guarantee is a claim, not a property.**
+There is now a test that SIGKILLs a detector partway through a batch and
+asserts it resumes from the last committed window, scoring every eligible
+window exactly once
+([tests/integration/test_detector_crash_resumability.py](tests/integration/test_detector_crash_resumability.py)).
+It is written so that it fails against the old code, where a kill left
+zero committed windows.
 
 ## Lineage: declared, not runtime-emitted, in v1
 

@@ -138,16 +138,19 @@ directories or files exist for these.
   (DEFENSE.md #52). Real, scoped-out work, not forgotten - needs the
   watermark/lateness computation wired into the Flink job first.
 
-- **Repeated-run variance is measured (5 runs) and is bimodal.** Which
-  scenarios get flagged,
-  the clean-replay spurious-incident count, warmed buckets and covered
-  hours were *bit-identical* between runs, while time-to-flag was not.
-  The cause is late-drop: three of five runs lost ~19,270 events to the
-  watermark and two lost none, from the same input - a race between replay
-  pacing and watermark advance that is not deterministic. It lands on one
-  of two values, never between them. Everything downstream
-  of that (how many incidents fire inside a scenario's span, and hence
-  the first one's timestamp) inherits the variance.
+- **Repeated-run variance is unmeasured for the published contiguous
+  run.** V4's five-run requirement is deliberately relaxed for
+  `run_benchmark.py` (CLAUDE.md): the pipeline is deterministic given the
+  same input, so repetition re-verifies one scenario rather than sampling
+  a distribution. What is known comes from five runs under the superseded
+  band-sampled method: scenarios flagged, the spurious-incident count and
+  warmed buckets were bit-identical across all five, while time-to-flag
+  and the unattributed-incident count were not. That non-determinism is a
+  race between replay pacing and watermark advance - whether a given late
+  record beats the watermark - so those two figures are the ones a rerun
+  would most likely move. Quantifying the spread under contiguous replay
+  needs repeated full runs at roughly 4.4h each, which is the cost this
+  relaxation is trading away.
 
 - **Attribution cannot separate an injected failure from incidental
   late-drop.** An incident is attributed to a scenario when the detector
@@ -160,14 +163,19 @@ directories or files exist for these.
   expected-vs-landed accounting inside the injected phase, not just the
   aggregate bound the runner asserts today.
 
-- **The freshness detector is unmeasured by the benchmark.** Band
-  sampling (four `(weekday, hour)` bands, to warm baselines affordably)
-  leaves ~42-hour gaps between band occurrences, and the freshness
-  detector's signal *is* the gap between consecutive windows - so its
-  baseline learns those gaps as normal and a real multi-minute gap is
-  invisible. Measuring it needs a contiguous replay long enough to warm a
-  bucket without sampling gaps, which is a much heavier run than the
-  current one.
+- **The freshness detector cannot see a delay failure that thins a
+  stream without stopping it.** Now measured rather than assumed: against
+  `freshness_gradual_delay` it reached a strongest score of 0.01 against
+  a 3.5 threshold across 763 scored windows - effectively no deviation at
+  all, not a near miss. Its signal is the gap between consecutive
+  `window_metrics` rows, and as long as some events still land in every
+  minute, windows keep closing once a minute no matter how many events
+  were dropped for crossing the watermark bound. Catching this class of
+  failure needs a signal that reflects *how much* data arrived late or
+  not at all, not just whether a window closed - which is the
+  event-lateness signal in the "Event-delay drift detection" entry
+  above, blocked on the lateness columns the current pipeline never
+  populates (DEFENSE.md #52).
 
 - **RESOLVED (root cause found, fixed): benchmark runtime grew with
   window count.** Runs 34757520031 and 34885328884 were both killed at
@@ -176,6 +184,9 @@ directories or files exist for these.
   a SAVEPOINT and every window accumulated in one never-committed
   transaction, pushing Postgres past its 64-subtransaction cache. Scoring
   decayed from ~172/s to ~14/s and reset at each detector boundary, which
-  is what identified it. Fixed by `adapter.release_snapshot`, which also
-  restores the per-window crash resumability `process_window` documents.
-  Full account in DEFENSE.md #55.
+  is what identified it. Fixed by `adapter.release_snapshot`; the
+  published run then scored a phase in 776s rather than not finishing in
+  four and a half hours. The fix also restores the per-window crash
+  resumability `process_window` documents, which is now covered by
+  `tests/integration/test_detector_crash_resumability.py`. Full account
+  in DEFENSE.md #55 and in README.md's design-decisions section.
