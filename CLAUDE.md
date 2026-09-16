@@ -140,7 +140,15 @@ number.
 
 - **S1.** Never paste a token, key, or credential into a message, log,
   script, or commit. Env vars only.
-- **S2.** gitleaks or detect-secrets runs in pre-commit and CI.
+- **S2.** detect-secrets runs in CI, on every tracked file, against an
+  audited `.secrets.baseline` — the `Secret scan (S2)` job in
+  `ci.yml`. It is also configured in `.pre-commit-config.yaml` for local
+  use. This previously read "runs in pre-commit and CI" while running in
+  neither: the CI job did not exist and the local hook was not
+  installed, so the control had never executed. Corrected during a
+  pre-publication audit. Note that `pre-commit install` also enables the
+  ruff hooks, which currently report formatting drift across most of the
+  tree (docs/FUTURE_WORK.md) — the secret scan is the part CI enforces.
 
 ## Design Before Code
 

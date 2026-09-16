@@ -14,8 +14,12 @@ on:
 # SeaweedFS creates the identity from these same values at runtime, so
 # any self-consistent pair works. Not a credential.
 env:
-  WEIR_S3_ACCESS_KEY: weir-local-ci
-  WEIR_S3_SECRET_KEY: weir-local-ci-no-secret-needed
+  WEIR_S3_ACCESS_KEY: weir-local-ci  # pragma: allowlist secret
+  WEIR_S3_SECRET_KEY: weir-local-ci-no-secret-needed  # pragma: allowlist secret
+  # docker-compose.yml and every Postgres-touching script now require
+  # this too, same reasoning. Throwaway value for an ephemeral
+  # container that initialises its own superuser from it.
+  POSTGRES_PASSWORD: weir-local-ci  # pragma: allowlist secret
 
 jobs:
   verify:
@@ -78,7 +82,7 @@ jobs:
         # against the real Postgres service, insert one literal row,
         # confirm it landed via psql. Proves the connector factory is
         # registered and functional, not just that the jar file exists.
-        run: |
+        run: |  # pragma: allowlist secret
           docker compose exec -T postgres psql -U weir -d weir_catalog -c \
             "CREATE TABLE IF NOT EXISTS public.weir_jdbc_smoke_test (id INT PRIMARY KEY, note TEXT);"
           cat > /tmp/jdbc_smoke.sql << 'EOF'
@@ -92,7 +96,7 @@ jobs:
             'url' = 'jdbc:postgresql://postgres:5432/weir_catalog',
             'table-name' = 'public.weir_jdbc_smoke_test',
             'username' = 'weir',
-            'password' = 'weir'
+            'password' = 'weir'  -- pragma: allowlist secret
           );
           INSERT INTO jdbc_smoke_sink VALUES (1, 'jdbc connector loaded');
           EOF

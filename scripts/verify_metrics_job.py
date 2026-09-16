@@ -143,6 +143,11 @@ def main():
     p.add_argument("--watermark-bound-seconds", type=int, default=270)
     p.add_argument("--pg-container", default="postgres")
     p.add_argument("--pg-user", default="weir")
+    # No literal default: this is substituted into the Flink job's JDBC
+    # sink DDL. Same reasoning as every other password argument.
+    p.add_argument("--pg-password", default=os.environ.get("POSTGRES_PASSWORD"),
+                   required=os.environ.get("POSTGRES_PASSWORD") is None,
+                   help="Postgres password. Set POSTGRES_PASSWORD or pass this flag.")
     p.add_argument("--pg-db", default="weir_catalog")
     p.add_argument("--flink-ui-port", type=int, default=8081)
     args = p.parse_args()
@@ -366,7 +371,7 @@ def main():
                .replace("__WEIR_METRICS_TOPIC__", args.topic)
                .replace("__WEIR_METRICS_PG_DB__", args.pg_db)
                .replace("__WEIR_METRICS_PG_USER__", args.pg_user)
-               .replace("__WEIR_METRICS_PG_PASSWORD__", "weir"))
+               .replace("__WEIR_METRICS_PG_PASSWORD__", args.pg_password))
     resolved = tempfile.NamedTemporaryFile(prefix="weir_metrics_job_resolved_", suffix=".sql", delete=False)
     resolved.write(job_sql.encode("utf-8"))
     resolved.close()

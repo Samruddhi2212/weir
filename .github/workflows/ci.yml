@@ -14,10 +14,51 @@ on:
 # SeaweedFS creates the identity from these same values at runtime, so
 # any self-consistent pair works. Not a credential.
 env:
-  WEIR_S3_ACCESS_KEY: weir-local-ci
-  WEIR_S3_SECRET_KEY: weir-local-ci-no-secret-needed
+  WEIR_S3_ACCESS_KEY: weir-local-ci  # pragma: allowlist secret
+  WEIR_S3_SECRET_KEY: weir-local-ci-no-secret-needed  # pragma: allowlist secret
+  # docker-compose.yml and every Postgres-touching script now require
+  # this too, same reasoning. Throwaway value for an ephemeral
+  # container that initialises its own superuser from it.
+  POSTGRES_PASSWORD: weir-local-ci  # pragma: allowlist secret
 
 jobs:
+  secrets:
+    name: Secret scan (S2)
+    runs-on: ubuntu-latest
+    # CLAUDE.md S2 claims "gitleaks or detect-secrets runs in pre-commit
+    # and CI." The pre-commit half was configured but the CI half never
+    # existed, and the local hook was not installed either - so the
+    # control had never actually run on a single commit. Found during a
+    # pre-publication audit. Asserting a security control that does not
+    # execute is the same class of mistake as the crash-resumability
+    # guarantee in README.md's design-decisions section: a claim, not a
+    # property. This job is the property.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install detect-secrets
+        # Pinned to the same rev as .pre-commit-config.yaml, so the hook
+        # and this job cannot disagree about what counts as a secret.
+        run: |
+          # The pragma is on this line because detect-secrets flags its
+          # own version pin: "secrets==1.5.0" matches its Secret Keyword
+          # pattern. Same line as the finding is where the filter looks.
+          pip install "detect-secrets==1.5.0"  # pragma: allowlist secret
+      - name: Scan every tracked file against the audited baseline
+        # detect-secrets-hook, not `scan`: `scan --baseline` rewrites the
+        # baseline in place, flags the baseline's own stored hashes, and
+        # records path separators for whichever OS produced it - a
+        # baseline written on Windows would never match a Linux runner.
+        # The hook reports only findings absent from the baseline and
+        # exits non-zero, which is the assertion wanted here. It is also
+        # exactly what .pre-commit-config.yaml runs, so local and CI
+        # cannot disagree.
+        run: |  # pragma: allowlist secret
+          git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+          echo "detect-secrets: no findings outside the audited baseline"
+
   constraints:
     name: Constraints (C1, C4)
     runs-on: ubuntu-latest
