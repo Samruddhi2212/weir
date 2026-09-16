@@ -30,7 +30,12 @@ jobs:
         # asciinema is pinned: its 3.x CLI is not compatible with the
         # `rec -c` invocation below. agg (asciinema's own cast->GIF
         # renderer) ships as a single static binary.
+        # pyarrow is not a detector dependency, but volume/adapter.py
+        # reaches DST_FALLBACK_AMBIGUOUS_HOURS through a parquet loader,
+        # so importing any detector needs it. Its absence is what turned
+        # the first recording into a traceback.
         run: |
+          pip install pyarrow
           pip install -r reliability/volume/requirements.txt
           pip install "asciinema==2.4.0"
           AGG_VERSION=$(curl -fsSL https://api.github.com/repos/asciinema/agg/releases/latest \
@@ -65,14 +70,27 @@ jobs:
       - name: Record
         env:
           TERM: xterm-256color
-          # asciinema has no --cols flag; with no controlling tty it
-          # falls back to these, and 100 columns keeps psql's output
-          # from wrapping.
-          COLUMNS: "100"
-          LINES: "30"
           DEMO_PAUSE: ${{ github.event.inputs.pause }}
+        # With no controlling tty asciinema records a fixed 80x24 and
+        # offers no way to widen it, so scripts/demo.sh is written to fit
+        # 80 columns instead of fighting the pty.
+        #
+        # asciinema exits 0 no matter how the recorded command ended - the
+        # first run of this workflow reported success over a recording
+        # that was a bare ModuleNotFoundError traceback. So the recording
+        # is checked two ways: the sentinel demo.sh writes only on its
+        # last line, and the cast itself scanned for a traceback.
         run: |
+          rm -f demo-ok
           asciinema rec --command "bash scripts/demo.sh" --overwrite demo.cast
+          if [ ! -f demo-ok ]; then
+            echo "FAIL: the recorded session did not reach its last line"
+            exit 1
+          fi
+          if grep -q "Traceback" demo.cast; then
+            echo "FAIL: the recording contains a Python traceback"
+            exit 1
+          fi
           agg --font-size 16 --theme asciinema demo.cast docs/demo.gif
           ls -l demo.cast docs/demo.gif
       - name: Upload the recording
