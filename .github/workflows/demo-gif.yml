@@ -1,0 +1,92 @@
+name: Record the demo GIF
+
+# Generates docs/demo.gif from scripts/demo.sh against the real stack, so
+# the README's animation is a recording of genuine output rather than a
+# mock-up. Dispatch-only and asserts nothing - it produces a doc asset.
+#
+# Recorded in CI rather than on a laptop for the same reason the
+# benchmark runs here: this is the environment where the stack
+# reproducibly exists. The GIF is uploaded as an artifact and committed
+# by hand, so a regenerated demo is always a deliberate act.
+on:
+  workflow_dispatch:
+    inputs:
+      pause:
+        description: "Seconds to hold between steps (pacing of the GIF)"
+        required: false
+        default: "1.6"
+
+jobs:
+  record:
+    name: Record scripts/demo.sh against a live stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies and the recorder
+        # asciinema is pinned: its 3.x CLI is not compatible with the
+        # `rec -c` invocation below. agg (asciinema's own cast->GIF
+        # renderer) ships as a single static binary.
+        run: |
+          pip install -r reliability/volume/requirements.txt
+          pip install "asciinema==2.4.0"
+          AGG_VERSION=$(curl -fsSL https://api.github.com/repos/asciinema/agg/releases/latest \
+            | python -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          echo "agg version: $AGG_VERSION"
+          curl -fsSL -o /usr/local/bin/agg \
+            "https://github.com/asciinema/agg/releases/download/${AGG_VERSION}/agg-x86_64-unknown-linux-gnu"
+          chmod +x /usr/local/bin/agg
+          agg --version
+      - name: Start Kafka and Postgres
+        run: docker compose up -d kafka postgres
+      - name: Wait for Postgres healthy
+        run: |
+          WAITED=0
+          MAX_WAIT=120
+          until docker compose ps postgres | grep -q "(healthy)"; do
+            WAITED=$((WAITED + 5))
+            if [ "$WAITED" -ge "$MAX_WAIT" ]; then
+              docker compose ps
+              docker compose logs postgres
+              echo "FAIL: postgres not healthy after ${MAX_WAIT}s"
+              exit 1
+            fi
+            sleep 5
+          done
+      - name: Apply both schemas
+        run: |
+          docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U weir -d weir_catalog \
+            < reliability/store/schema.sql
+          docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U weir -d weir_catalog \
+            < reliability/store/incidents_schema.sql
+      - name: Record
+        env:
+          TERM: xterm-256color
+          # asciinema has no --cols flag; with no controlling tty it
+          # falls back to these, and 100 columns keeps psql's output
+          # from wrapping.
+          COLUMNS: "100"
+          LINES: "30"
+          DEMO_PAUSE: ${{ github.event.inputs.pause }}
+        run: |
+          asciinema rec --command "bash scripts/demo.sh" --overwrite demo.cast
+          agg --font-size 16 --theme asciinema demo.cast docs/demo.gif
+          ls -l demo.cast docs/demo.gif
+      - name: Upload the recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-gif
+          path: |
+            docs/demo.gif
+            demo.cast
+          if-no-files-found: warn
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs postgres kafka
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
