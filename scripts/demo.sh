@@ -52,6 +52,14 @@ note "cross, so the next step shows why it fires - not just that it did."
 python incidents/dev/volume_drop.py --window-end "2025-01-06 08:31:00" --row-count 40
 sleep "$PAUSE"
 
+step "python incidents/dev/volume_drop.py \
+    --window-end '2025-01-06 08:37:00' --row-count 500"
+note "the lag buffer holds back the newest max_lag_seconds of windows, so"
+note "08:31 is only eligible once a later window exists (DEFENSE.md #51)."
+note "500 rows is normal for this bucket, so this one flags nothing itself."
+python incidents/dev/volume_drop.py --window-end "2025-01-06 08:37:00" --row-count 500
+sleep "$PAUSE"
+
 step "python reliability/volume/run.py"
 note "no --assume-no-more-arrivals: the lag buffer stays on, as in a real run."
 python reliability/volume/run.py
