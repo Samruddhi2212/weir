@@ -390,6 +390,12 @@ def populate(args, stream_path, expected_count, label, allow_late_drop=False):
         "--expected-emitted-count", str(expected_count),
         "--preserve-input-order",
         "--replay-timeout", str(args.replay_timeout),
+        # Passed explicitly rather than left to environment inheritance.
+        # It would work either way - subprocess inherits os.environ - but
+        # then this step would silently depend on ambient state, and the
+        # failure if POSTGRES_PASSWORD were missing would surface as a
+        # child process exiting 2 hours into a run.
+        "--pg-password", args.password,
     ]
     if allow_late_drop:
         cmd.append("--allow-late-drop")
