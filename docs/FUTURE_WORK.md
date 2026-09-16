@@ -190,3 +190,17 @@ directories or files exist for these.
   resumability `process_window` documents, which is now covered by
   `tests/integration/test_detector_crash_resumability.py`. Full account
   in DEFENSE.md #55 and in README.md's design-decisions section.
+
+- **The tree has drifted from its own configured formatter.**
+  `.pre-commit-config.yaml` pins ruff and ruff-format, but the hook was
+  never installed and no CI job ran it, so it had never executed.
+  Installing it during a pre-publication audit reformatted 39 files
+  (~1900 lines) and surfaced one lint error (an `E731` lambda assignment
+  in a test). None of it is a defect - it is accumulated formatting
+  divergence. It is deliberately *not* fixed in the same change as the
+  credential work: a 2000-line reformat would have buried a security
+  change in noise, and the reformatting itself is unverified. Doing it
+  properly means one commit that is purely `ruff-format`, the `E731`
+  fixed by hand, the suite re-run, and then a CI job so it cannot drift
+  again - the same "make it a property, not a claim" move that the
+  secret scan just got.

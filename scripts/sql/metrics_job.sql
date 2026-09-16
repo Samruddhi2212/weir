@@ -168,7 +168,7 @@ CREATE TABLE weir_metrics_wide_sink (
   'url' = 'jdbc:postgresql://postgres:5432/__WEIR_METRICS_PG_DB__',
   'table-name' = 'weir_metrics.window_metrics_wide',
   'username' = '__WEIR_METRICS_PG_USER__',
-  'password' = '__WEIR_METRICS_PG_PASSWORD__'
+  'password' = '__WEIR_METRICS_PG_PASSWORD__'  -- pragma: allowlist secret
 );
 
 INSERT INTO weir_metrics_wide_sink

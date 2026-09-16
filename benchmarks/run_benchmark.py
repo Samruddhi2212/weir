@@ -37,6 +37,7 @@ the buffer clears against something real, then excluded from every
 count.
 """
 import argparse
+import os
 import contextlib
 import datetime
 import json
@@ -389,6 +390,12 @@ def populate(args, stream_path, expected_count, label, allow_late_drop=False):
         "--expected-emitted-count", str(expected_count),
         "--preserve-input-order",
         "--replay-timeout", str(args.replay_timeout),
+        # Passed explicitly rather than left to environment inheritance.
+        # It would work either way - subprocess inherits os.environ - but
+        # then this step would silently depend on ambient state, and the
+        # failure if POSTGRES_PASSWORD were missing would surface as a
+        # child process exiting 2 hours into a run.
+        "--pg-password", args.password,
     ]
     if allow_late_drop:
         cmd.append("--allow-late-drop")
@@ -824,7 +831,13 @@ def main():
     parser.add_argument("--port", type=int, default=5432)
     parser.add_argument("--dbname", default="weir_catalog")
     parser.add_argument("--user", default="weir")
-    parser.add_argument("--password", default="weir")
+    # No literal default. A guessable built-in default is worse than a
+    # required variable: it lets a misconfigured run succeed quietly
+    # against a credential anyone reading the repo already knows. Any
+    # value works locally - see .env.example - but it has to be chosen.
+    parser.add_argument("--password", default=os.environ.get("POSTGRES_PASSWORD"),
+                        required=os.environ.get("POSTGRES_PASSWORD") is None,
+                        help="Postgres password. Set POSTGRES_PASSWORD or pass this flag.")
     parser.add_argument("--limit", type=int, default=0,
                         help="replay only the first N real trips (0 = all)")
     parser.add_argument("--warmup-fraction", type=float, default=0.75,

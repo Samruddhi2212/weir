@@ -20,6 +20,7 @@ never unaccounted-for (V8):
      independent count straight from scored_windows
 """
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -50,7 +51,13 @@ def main():
     parser.add_argument("--port", type=int, default=5432)
     parser.add_argument("--dbname", default="weir_catalog")
     parser.add_argument("--user", default="weir")
-    parser.add_argument("--password", default="weir")
+    # No literal default. A guessable built-in default is worse than a
+    # required variable: it lets a misconfigured run succeed quietly
+    # against a credential anyone reading the repo already knows. Any
+    # value works locally - see .env.example - but it has to be chosen.
+    parser.add_argument("--password", default=os.environ.get("POSTGRES_PASSWORD"),
+                        required=os.environ.get("POSTGRES_PASSWORD") is None,
+                        help="Postgres password. Set POSTGRES_PASSWORD or pass this flag.")
     args = parser.parse_args()
 
     conninfo = (
