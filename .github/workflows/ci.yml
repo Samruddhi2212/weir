@@ -46,18 +46,17 @@ jobs:
           # own version pin: "secrets==1.5.0" matches its Secret Keyword
           # pattern. Same line as the finding is where the filter looks.
           pip install "detect-secrets==1.5.0"  # pragma: allowlist secret
-      - name: Scan every tracked file against the audited baseline
-        # detect-secrets-hook, not `scan`: `scan --baseline` rewrites the
-        # baseline in place, flags the baseline's own stored hashes, and
-        # records path separators for whichever OS produced it - a
-        # baseline written on Windows would never match a Linux runner.
-        # The hook reports only findings absent from the baseline and
-        # exits non-zero, which is the assertion wanted here. It is also
-        # exactly what .pre-commit-config.yaml runs, so local and CI
-        # cannot disagree.
-        run: |  # pragma: allowlist secret
-          git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
-          echo "detect-secrets: no findings outside the audited baseline"
+      - name: No secret outside the audited baseline
+        # scripts/check_no_new_secrets.py rather than detect-secrets'
+        # own entry points: `scan --baseline` and `detect-secrets-hook`
+        # both rewrite the baseline for bookkeeping (line numbers, their
+        # own filter list) and exit non-zero asking for it to be
+        # committed. The hook did that on this runner while exiting 0 on
+        # Windows for an identical tree, which made the check depend on
+        # the OS rather than on whether a secret existed. The script
+        # compares (path, hash) pairs and ignores everything incidental.
+        # Its failure path is tested: a planted AWS key is caught.
+        run: python scripts/check_no_new_secrets.py
 
   constraints:
     name: Constraints (C1, C4)
