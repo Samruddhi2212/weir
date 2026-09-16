@@ -50,7 +50,13 @@ jobs:
         # pyarrow: tests/integration/test_load_pickup_timestamps.py
         # imports it at module scope, so a missing pyarrow is a
         # collection ERROR, not the graceful skip its skipif intends.
-        run: pip install pytest pyarrow
+        # psycopg: already a project dependency (no new dependency, hard
+        # rule 6), needed by test_detector_crash_resumability.py, which
+        # talks to the compose Postgres directly. Installed from the
+        # requirements file so the pin stays in one place.
+        run: |
+          pip install pytest pyarrow
+          pip install -r reliability/volume/requirements.txt
       - name: Start stack
         run: docker compose up -d --build
       - name: Capture Flink lib/ jar manifest

@@ -65,10 +65,14 @@ WHERE NOT w.granted
 ORDER BY w.pid
 """
 
+# Filtered in Python, not SQL. A row-constructor "(schemaname, relname)
+# IN %s" is rendered by psycopg as "IN $1", which Postgres rejects
+# outright - and it did, 2044 times, for a whole benchmark run that
+# collected no samples at all.
 COUNTER_SQL = """
-SELECT schemaname, relname, n_tup_ins, n_live_tup
+SELECT schemaname, relname, n_tup_ins, n_live_tup, n_dead_tup
 FROM pg_stat_user_tables
-WHERE (schemaname, relname) IN %s
+WHERE schemaname = ANY(%s)
 ORDER BY schemaname, relname
 """
 
@@ -84,15 +88,20 @@ def sample(conn):
         activity = cur.fetchall()
         cur.execute(BLOCKED_SQL)
         blocked = cur.fetchall()
-        cur.execute(COUNTER_SQL, (COUNTER_TABLES,))
-        counters = {f"{s}.{r}": (ins, live) for s, r, ins, live in cur.fetchall()}
+        cur.execute(COUNTER_SQL, (sorted({s for s, _ in COUNTER_TABLES}),))
+        counters = {
+            f"{s}.{r}": (ins, live, dead)
+            for s, r, ins, live, dead in cur.fetchall()
+            if (s, r) in COUNTER_TABLES
+        }
     return activity, blocked, counters
 
 
 def write_sample(out, stamp, activity, blocked, counters):
     out.write(f"=== {stamp} ===\n")
-    for name, (ins, live) in sorted(counters.items()):
-        out.write(f"  counter {name}: n_tup_ins={ins} n_live_tup={live}\n")
+    for name, (ins, live, dead) in sorted(counters.items()):
+        out.write(f"  counter {name}: n_tup_ins={ins} n_live_tup={live} "
+                  f"n_dead_tup={dead}\n")
     for pid, state, wet, we, xact_age, state_age, query in activity:
         xact = f"{xact_age:.1f}s" if xact_age is not None else "-"
         held = f"{state_age:.1f}s" if state_age is not None else "-"
@@ -114,6 +123,11 @@ def main():
     parser.add_argument("--interval", type=float, default=5.0)
     parser.add_argument("--heartbeat", type=float, default=60.0,
                         help="seconds between one-line stdout summaries")
+    parser.add_argument("--samples", type=int, default=0,
+                        help="exit after N successful samples, non-zero if any "
+                             "sample errored. 0 (default) samples until killed. "
+                             "Used to verify the sampler itself actually works - "
+                             "it silently collected nothing for a whole run once")
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=5432)
     parser.add_argument("--dbname", default="weir_catalog")
@@ -132,6 +146,7 @@ def main():
     # otherwise print hundreds of identical lines.
     reported_blocks = set()
     samples = 0
+    errors = 0
 
     with open(args.out, "a", buffering=1) as out:
         out.write(f"=== sampler started {now()}, every {args.interval}s ===\n")
@@ -159,13 +174,16 @@ def main():
                     busy = [f"{pid}:{state}/{wet or '-'}"
                             for pid, state, wet, _, _, _, _ in activity
                             if state in INTERESTING_STATES]
-                    inserts = counters.get("weir_incidents.scored_windows", (0, 0))[0]
+                    inserts = counters.get("weir_incidents.scored_windows", (0, 0, 0))[0]
                     print(f"[pg-sampler] {stamp} samples={samples} "
                           f"scored_windows_inserts={inserts} "
                           f"blocked={len(blocked)} busy={busy or 'none'}", flush=True)
+                if args.samples and samples >= args.samples:
+                    break
             except KeyboardInterrupt:
                 break
             except Exception as exc:  # noqa: BLE001 - a sampler must outlive a blip
+                errors += 1
                 out.write(f"=== {now()} sampler error: {type(exc).__name__}: {exc} ===\n")
                 print(f"[pg-sampler] error: {type(exc).__name__}: {exc}", flush=True)
                 if conn is not None and not conn.closed:
@@ -175,6 +193,12 @@ def main():
 
     if conn is not None and not conn.closed:
         conn.close()
+
+    if args.samples:
+        print(f"[pg-sampler] {samples} sample(s) collected, {errors} error(s)", flush=True)
+        if errors or samples < args.samples:
+            print("FAIL: the sampler did not collect clean samples", flush=True)
+            return 1
     return 0
 
 
