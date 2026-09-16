@@ -203,8 +203,13 @@ def normalize_warehouse_path(p):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--emission-log", required=True)
-    parser.add_argument("--s3-access-key", default=os.environ.get("WEIR_S3_ACCESS_KEY", "admin"))
-    parser.add_argument("--s3-secret-key", default=os.environ.get("WEIR_S3_SECRET_KEY", "password123"))
+    # No fallback default. A guessable built-in default is worse than a
+    # required variable: it lets a misconfigured run succeed quietly
+    # against a credential anyone reading the repo already knows. Any
+    # value works locally (see .env.example for why it is the pairing
+    # that matters), but it has to be chosen rather than inherited.
+    parser.add_argument("--s3-access-key", default=os.environ.get("WEIR_S3_ACCESS_KEY"))
+    parser.add_argument("--s3-secret-key", default=os.environ.get("WEIR_S3_SECRET_KEY"))
     parser.add_argument("--filer-host", default="localhost")
     parser.add_argument("--filer-port", type=int, default=int(os.environ.get("SEAWEEDFS_FILER_PORT", "8888")))
     parser.add_argument(
@@ -222,6 +227,17 @@ def main():
     parser.add_argument("--sql-timeout", type=int, default=90)
     parser.add_argument("--report-json", default=None, help="optional path to also write the report as JSON")
     args = parser.parse_args()
+
+    for flag, env_name, value in (
+        ("--s3-access-key", "WEIR_S3_ACCESS_KEY", args.s3_access_key),
+        ("--s3-secret-key", "WEIR_S3_SECRET_KEY", args.s3_secret_key),
+    ):
+        if not value:
+            parser.error(
+                f"{flag} is required: pass it, or set {env_name}. Any value works "
+                f"for local dev - see .env.example - but there is deliberately no "
+                f"default. Try: cp .env.example .env && set -a && . ./.env"
+            )
 
     emission_log_abs = os.path.abspath(args.emission_log)
     report_json_abs = os.path.abspath(args.report_json) if args.report_json else None
