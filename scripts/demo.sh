@@ -45,7 +45,8 @@ ON CONFLICT (detector_name, bucket_weekday, bucket_hour) DO UPDATE
       ewma_mean = EXCLUDED.ewma_mean, ewma_mad = EXCLUDED.ewma_mad;"
 sleep "$PAUSE"
 
-step "python incidents/dev/volume_drop.py --window-end '2025-01-06 08:31:00' --row-count 40"
+step "python incidents/dev/volume_drop.py \
+    --window-end '2025-01-06 08:31:00' --row-count 40"
 note "the trigger prints the live baseline and the threshold a row count must"
 note "cross, so the next step shows why it fires - not just that it did."
 python incidents/dev/volume_drop.py --window-end "2025-01-06 08:31:00" --row-count 40
@@ -75,5 +76,11 @@ if [ "$FOUND" -lt 1 ]; then
     exit 1
 fi
 
-say "40 rows against a baseline of 500 - flagged, with the score that crossed 3.5."
+say "40 rows against a baseline of 500 - flagged, past the 3.5 threshold."
 sleep 2
+
+# asciinema exits 0 whether or not the command it recorded succeeded, so
+# set -e alone cannot fail the workflow - it reported success over a
+# recording that was nothing but a traceback. This sentinel is what the
+# workflow actually checks.
+: > demo-ok
