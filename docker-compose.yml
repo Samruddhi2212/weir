@@ -92,7 +92,8 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-weir_catalog}
       POSTGRES_USER: ${POSTGRES_USER:-weir}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-weir}
+      # Required, not defaulted - same reasoning as the S3 keys above.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD - any value works locally, see .env.example}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -167,7 +168,7 @@ services:
       CATALOG_S3_PATH__STYLE__ACCESS: "true"
       CATALOG_URI: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-weir_catalog}
       CATALOG_JDBC_USER: ${POSTGRES_USER:-weir}
-      CATALOG_JDBC_PASSWORD: ${POSTGRES_PASSWORD:-weir}
+      CATALOG_JDBC_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD - any value works locally, see .env.example}
       # AWS SDK v2 always requires a resolvable region, even against
       # non-AWS S3-compatible storage where the region is functionally
       # meaningless - confirmed via the actual exception this produced
