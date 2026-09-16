@@ -128,6 +128,53 @@ def report(label, timings, counts):
     return aggregate
 
 
+def time_accounting(conn, windows):
+    """Wall-clock each post-scoring accounting read the benchmark does.
+
+    These are imported from benchmarks/run_benchmark.py rather than
+    reimplemented here: the point is to time the queries that actually
+    ran, not equivalent-looking ones. Run 34757520031 spent 4h36m in the
+    block that contains both scoring and these reads, and the measured
+    scoring rate only accounts for about a third of it, so the remainder
+    is somewhere in this list.
+
+    assert_accounting is deliberately excluded - it exits the process on
+    a mismatch, and this probe's synthetic windows are not the shape its
+    invariants describe."""
+    from benchmarks.run_benchmark import (
+        bucket_sample_counts,
+        clean_event_time_hours,
+        collect_incidents,
+        landed_row_total,
+        scored_window_counts,
+        warmed_bucket_count,
+    )
+
+    # No trailing window is appended here, so this sentinel matches no
+    # real window_end - every 'WHERE window_end <> trailing' read
+    # therefore covers the whole table, which is the expensive case.
+    trailing = SEED_ANCHOR - datetime.timedelta(minutes=1)
+
+    print(f"\n--- post-scoring accounting reads over {windows} windows ---")
+    for name, call in (
+        ("collect_incidents", lambda: collect_incidents(conn)),
+        ("scored_window_counts", lambda: scored_window_counts(conn)),
+        ("warmed_bucket_count", lambda: warmed_bucket_count(conn)),
+        ("bucket_sample_counts", lambda: bucket_sample_counts(conn)),
+        ("landed_row_total", lambda: landed_row_total(conn, trailing)),
+        ("clean_event_time_hours", lambda: clean_event_time_hours(conn, trailing)),
+    ):
+        started = time.monotonic()
+        try:
+            call()
+        except Exception as exc:  # noqa: BLE001 - a probe reports, it does not mask
+            print(f"  {name}: raised {type(exc).__name__}: {exc}")
+            conn.rollback()
+            continue
+        print(f"  {name}: {time.monotonic() - started:.2f}s")
+        conn.rollback()
+
+
 def project(aggregate_rate, span_weeks, detectors=3):
     """Hours of scoring for one replay phase at a given contiguous span."""
     windows = span_weeks * 7 * 24 * 60
@@ -143,12 +190,23 @@ def main():
     parser.add_argument("--metrics-per-window", type=int, default=REAL_METRICS_PER_WINDOW,
                         help="column_metrics rows per window, matching what the Flink "
                              "job really writes, so the database is realistically sized")
+    parser.add_argument("--settings", default="on",
+                        help="comma-separated synchronous_commit values to measure. "
+                             "Defaults to 'on' alone: a 20000-window probe already "
+                             "measured 'off' at 1.00x, so it is not worth doubling a "
+                             "long run to re-measure a settled non-effect")
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=5432)
     parser.add_argument("--dbname", default="weir_catalog")
     parser.add_argument("--user", default="weir")
     parser.add_argument("--password", default="weir")
     args = parser.parse_args()
+
+    settings = [s.strip() for s in args.settings.split(",") if s.strip()]
+    unknown = [s for s in settings if s not in ("on", "off", "local", "remote_write")]
+    if unknown:
+        print(f"FAIL: not valid synchronous_commit values: {unknown}")
+        sys.exit(1)
 
     conninfo = (
         f"host={args.host} port={args.port} dbname={args.dbname} "
@@ -168,7 +226,7 @@ def main():
         # run_once opens and closes for every window.
         admin = psycopg.connect(conninfo, autocommit=True, connect_timeout=10)
         try:
-            for setting in ("on", "off"):
+            for setting in settings:
                 reset_incidents(conn)
                 with admin.cursor() as cur:
                     cur.execute(f"ALTER SYSTEM SET synchronous_commit = '{setting}'")
@@ -197,6 +255,7 @@ def main():
                     time.sleep(0.1)
                 timings, counts = time_detectors(conn)
                 rates[setting] = report(setting, timings, counts)
+                time_accounting(conn, args.windows)
 
             with admin.cursor() as cur:
                 cur.execute("ALTER SYSTEM RESET synchronous_commit")
@@ -206,13 +265,14 @@ def main():
     finally:
         conn.close()
 
-    speedup = rates["off"] / rates["on"]
-    print(f"\nsynchronous_commit=off is {speedup:.2f}x the throughput of on")
+    if "off" in rates and "on" in rates:
+        print(f"\nsynchronous_commit=off is {rates['off'] / rates['on']:.2f}x "
+              f"the throughput of on")
     print("\nprojected scoring hours for ONE replay phase (three detectors):")
-    print(f"  {'span':>8}  {'on':>10}  {'off':>10}")
-    for span_weeks in (8, 10, 12):
-        print(f"  {span_weeks:>6}w  {project(rates['on'], span_weeks):>9.2f}h  "
-              f"{project(rates['off'], span_weeks):>9.2f}h")
+    for setting, rate in rates.items():
+        for span_weeks in (8, 10, 12):
+            print(f"  synchronous_commit={setting}, {span_weeks:>2}w span: "
+                  f"{project(rate, span_weeks):.2f}h")
     print("\nA full benchmark is TWO phases (clean + injected), so double the "
           "above and add ~1.2h/phase of replay. The CI ceiling is 6h.")
 

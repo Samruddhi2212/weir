@@ -26,9 +26,10 @@ BASE = datetime.datetime(2025, 1, 6, 0, 0, 0)
 SLICE_END = BASE + datetime.timedelta(days=1)
 
 
-def events(count, step_seconds=60):
+def events(count, step_seconds=60, start=None):
+    origin = start or BASE
     return [
-        {"_row_index": i, PICKUP_COLUMN: BASE + datetime.timedelta(seconds=i * step_seconds)}
+        {"_row_index": i, PICKUP_COLUMN: origin + datetime.timedelta(seconds=i * step_seconds)}
         for i in range(count)
     ]
 
@@ -43,6 +44,15 @@ def incident(detector_name, event_time, score=9.0):
     }
 
 
+def as_table(rows):
+    """The Arrow form the runner actually works in - it never
+    materialises a whole slice as dicts (a 12-week contiguous slice is
+    ~10.5M rows and OOM-killed the CI runner when it did)."""
+    import pyarrow as pa
+
+    return pa.Table.from_pylist(rows)
+
+
 def test_predicted_count_catches_a_scenario_that_does_nothing():
     # A duplicate storm declares it adds copies; if inject() silently did
     # nothing the prediction would no longer match, which is exactly the
@@ -50,7 +60,7 @@ def test_predicted_count_catches_a_scenario_that_does_nothing():
     source = events(120)
     storm = DuplicateEventStorm(BASE, BASE + datetime.timedelta(hours=1), copies=3)
 
-    predicted = predict_emitted_count([storm], source)
+    predicted = predict_emitted_count([storm], as_table(source), SLICE_END)
     actual = len(storm.inject(source))
 
     assert predicted == actual
@@ -63,12 +73,36 @@ def test_predicted_count_accounts_for_drops_and_additions_together():
     degraded = PartitionDegradation(BASE + datetime.timedelta(hours=2),
                                      BASE + datetime.timedelta(hours=3), num_partitions=3)
 
-    predicted = predict_emitted_count([storm, degraded], source)
+    predicted = predict_emitted_count([storm, degraded], as_table(source), SLICE_END)
 
     # Non-overlapping spans, so the two effects are independent and the
     # prediction is exact rather than approximate.
     from incidents.benchmark.scenario import compose
     assert predicted == len(compose([storm, degraded], source))
+
+
+def test_backfill_uses_explicit_source_events_when_given():
+    """The runner supplies the backfill's source rows directly, because
+    its source window lives in the warmup region that is never
+    materialised. Given a source, inject must use it rather than
+    filtering the (injection-only) stream it is handed - otherwise the
+    scenario silently becomes a no-op."""
+    from incidents.benchmark.catalog import UpstreamBackfillReplay
+
+    source_rows = events(10, start=BASE - datetime.timedelta(hours=5))
+    scenario = UpstreamBackfillReplay(
+        BASE + datetime.timedelta(hours=1),
+        backfill_age=datetime.timedelta(hours=6),
+        backfill_span=datetime.timedelta(hours=1),
+        source_events=source_rows,
+    )
+    stream = events(120)
+
+    out = scenario.inject(stream)
+
+    assert len(out) == len(stream) + len(source_rows)
+    replayed = [e for e in out if e[PICKUP_COLUMN] < BASE]
+    assert len(replayed) == len(source_rows), "the explicit source was not replayed"
 
 
 def test_attribution_requires_both_the_right_detector_and_the_right_window():

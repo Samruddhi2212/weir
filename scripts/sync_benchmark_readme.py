@@ -91,12 +91,12 @@ def render_block(result_file: Path | None) -> str:
         f"| Spurious incidents per scored window, clean replay | "
         f"{summary.get('false_positive_rate_fraction', 'n/a')} "
         f"({pct(summary.get('false_positive_rate'))}) |",
-        f"| Of those, at a band boundary (sampling artifact) | "
-        f"{summary.get('false_positives_at_band_boundaries', 'n/a')} |",
+        f"| Weekly samples per bucket (median, lowest detector) | "
+        f"{summary.get('weekly_samples_median', 'n/a')} |",
         f"| Median / p95 time to flag (event time) | "
         f"{seconds(summary.get('detection_latency_median_seconds'))} / "
         f"{seconds(summary.get('detection_latency_p95_seconds'))} |",
-        f"| Warmed buckets across {summary.get('band_count', 'n/a')} bands | "
+        f"| Warmed buckets over a contiguous {summary.get('span_weeks', 'n/a')}-week span | "
         f"{summary.get('warmed_buckets', 'n/a')} |",
         f"| Clean event-time hours covered | "
         f"{summary.get('clean_event_time_hours', 0):.2f} |"

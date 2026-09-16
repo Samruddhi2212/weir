@@ -14,7 +14,7 @@ jobs:
   benchmark:
     name: Clean + injected replay, measure detection rate / FP rate / latency
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -58,20 +58,48 @@ jobs:
         run: |
           docker compose exec -T postgres psql -U weir -d weir_catalog \
             < reliability/store/incidents_schema.sql
-      - name: Download four months of real NYC TLC data
-        # Warming one bucket needs ~8 weekly occurrences of its hour;
-        # four months gives ~17, leaving real headroom to score in.
+      - name: Download the months the contiguous span covers
+        # 12 contiguous weeks at 0.85 warmup = 10.2 weekly samples per
+        # bucket (612 observations vs the 480 floor) before injections
+        # start.
+        #
+        # Runs 34757520031 (12w) and 34885328884 (10w) were both killed
+        # at the ceiling, but not because the span was too long: every
+        # window was being processed as a SAVEPOINT inside one
+        # never-committed transaction, so per-window cost grew with the
+        # number of windows already done (~172/s falling to ~14/s, and
+        # resetting at each detector boundary). Fixed in
+        # adapter.release_snapshot. 10 weeks was the fallback while that
+        # was unexplained; with a flat rate the longer span fits and
+        # buys the better baseline maturity, so it goes back to 12.
         run: |
-          for MONTH in 2024-10 2024-11 2024-12 2025-01; do
+          for MONTH in 2024-10 2024-11 2024-12; do
             python ingestion/replay/download_tlc_data.py --year-month "$MONTH" --output-dir data/tlc
           done
       - name: Run the benchmark
+        # The sampler runs concurrently and is started first so it
+        # captures the whole run, including whatever happens in the
+        # stretch that went silent for 4h36m in run 34757520031. It is
+        # backgrounded inside this step rather than given its own, so
+        # the runner never has to keep a process alive across steps.
+        # If the job is killed at the ceiling neither trap nor kill
+        # fires, which is fine: the log is written line-buffered as it
+        # goes and the upload below is if: always().
         run: |
+          python -u scripts/sample_pg_activity.py \
+            --out pg-activity.log \
+            --interval 5 \
+            --port "${POSTGRES_PORT:-5432}" &
+          SAMPLER_PID=$!
+          trap 'kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+
           python -u benchmarks/run_benchmark.py \
             --input data/tlc/yellow_tripdata_2024-10.parquet \
                     data/tlc/yellow_tripdata_2024-11.parquet \
                     data/tlc/yellow_tripdata_2024-12.parquet \
-                    data/tlc/yellow_tripdata_2025-01.parquet \
+            --span-weeks 12 \
+            --warmup-fraction 0.85 \
+            --populate-timeout 7200 \
             --bootstrap-server localhost:${KAFKA_EXTERNAL_PORT:-29092}
       - name: Upload raw results
         if: always()
@@ -79,6 +107,13 @@ jobs:
         with:
           name: benchmark-results
           path: benchmarks/results/*.json
+          if-no-files-found: warn
+      - name: Upload the Postgres activity log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-activity
+          path: pg-activity.log
           if-no-files-found: warn
       - name: Show logs on failure
         if: failure()

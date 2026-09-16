@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 # that already put the repo root on sys.path).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from reliability.volume.adapter import process_window, register_detector
+from reliability.volume.adapter import process_window, register_detector, release_snapshot
 from reliability.volume.config import DEFAULT_CONFIG
 
 
@@ -54,7 +54,10 @@ def fetch_eligible_windows(conn, config, assume_no_more_arrivals=False):
     (DEFENSE.md #51) - only correct when the caller genuinely knows no
     further writes are coming for this range, e.g. verifying against
     an already-fully-loaded historical month. The default (False)
-    preserves live-polling's write-order protection unchanged."""
+    preserves live-polling's write-order protection unchanged.
+
+    Ends its own transaction before returning - see release_snapshot.
+    """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT last_processed_window_end FROM weir_incidents.detector_progress "
@@ -75,6 +78,8 @@ def fetch_eligible_windows(conn, config, assume_no_more_arrivals=False):
         )
         rows = cur.fetchall()
 
+    release_snapshot(conn)
+
     if not rows or assume_no_more_arrivals:
         return rows
 
@@ -83,21 +88,30 @@ def fetch_eligible_windows(conn, config, assume_no_more_arrivals=False):
     return [r for r in rows if r[1] <= max_window_end_seen - lag_buffer]
 
 
-def run_once(conn, config=DEFAULT_CONFIG, assume_no_more_arrivals=False):
+def run_once(conn, config=DEFAULT_CONFIG, assume_no_more_arrivals=False, progress=None):
     """Registers the detector if needed, then processes every
     currently eligible window in order. Returns the list of statuses
     written, one per window processed. See fetch_eligible_windows for
-    assume_no_more_arrivals."""
+    assume_no_more_arrivals.
+
+    progress, if given, is called as progress(done, total) after each
+    window. Purely observational - a live poll processes a handful of
+    windows and needs nothing, but the benchmark processes six figures
+    of them in one call, where a silent loop is indistinguishable from
+    a hung one."""
     register_detector(conn, config.detector_name)
 
-    statuses = []
-    for window_start_naive, window_end_naive, row_count in fetch_eligible_windows(
+    eligible = fetch_eligible_windows(
         conn, config, assume_no_more_arrivals=assume_no_more_arrivals
-    ):
+    )
+    statuses = []
+    for window_start_naive, window_end_naive, row_count in eligible:
         window_start_utc = to_utc_instant(window_start_naive, config.timezone)
         window_end_utc = to_utc_instant(window_end_naive, config.timezone)
         status = process_window(conn, window_start_utc, window_end_utc, float(row_count), config)
         statuses.append(status)
+        if progress is not None:
+            progress(len(statuses), len(eligible))
     return statuses
 
 
