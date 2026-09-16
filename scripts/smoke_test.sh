@@ -40,10 +40,21 @@ cd "$(git rev-parse --show-toplevel)"
 # Those files hardcode the matching literal values directly.
 TEST_TOPIC="weir-smoke-test"
 
-# Read here (not just in step 5) since the new SeaweedFS setup step below
-# also needs them - see DEFENSE.md #24.
-WEIR_S3_ACCESS_KEY="${WEIR_S3_ACCESS_KEY:-admin}"
-WEIR_S3_SECRET_KEY="${WEIR_S3_SECRET_KEY:-***REMOVED***}"
+# Required, with no default. A guessable built-in default is worse than a
+# variable the caller must set: it lets a misconfigured run succeed
+# quietly against a credential anyone reading the repo already knows.
+# Any value works locally - see .env.example for why it is the pairing
+# that matters, not the value - but it has to be chosen, not inherited.
+for _var in WEIR_S3_ACCESS_KEY WEIR_S3_SECRET_KEY; do
+  if [ -z "${!_var:-}" ]; then
+    echo "FAIL: $_var is not set." >&2
+    echo "      WEIR_S3_ACCESS_KEY and WEIR_S3_SECRET_KEY are both required." >&2
+    echo "      Any value works for local dev; there is deliberately no" >&2
+    echo "      default. Try: cp .env.example .env && set -a && . ./.env" >&2
+    exit 1
+  fi
+done
+unset _var
 
 fail() {
   echo ""

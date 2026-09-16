@@ -47,8 +47,21 @@ KAFKA_EXTERNAL_PORT="${KAFKA_EXTERNAL_PORT:-29092}"
 WEIR_EOS_TOPIC="${WEIR_EOS_TOPIC:-weir-eos-events}"
 WEIR_EOS_CHECKPOINT_INTERVAL="${WEIR_EOS_CHECKPOINT_INTERVAL:-10s}"
 WEIR_EOS_EVENTS_PER_SEC="${WEIR_EOS_EVENTS_PER_SEC:-100}"
-WEIR_S3_ACCESS_KEY="${WEIR_S3_ACCESS_KEY:-admin}"
-WEIR_S3_SECRET_KEY="${WEIR_S3_SECRET_KEY:-***REMOVED***}"
+# Required, with no default. A guessable built-in default is worse than a
+# variable the caller must set: it lets a misconfigured run succeed
+# quietly against a credential anyone reading the repo already knows.
+# Any value works locally - see .env.example for why it is the pairing
+# that matters, not the value - but it has to be chosen, not inherited.
+for _var in WEIR_S3_ACCESS_KEY WEIR_S3_SECRET_KEY; do
+  if [ -z "${!_var:-}" ]; then
+    echo "FAIL: $_var is not set." >&2
+    echo "      WEIR_S3_ACCESS_KEY and WEIR_S3_SECRET_KEY are both required." >&2
+    echo "      Any value works for local dev; there is deliberately no" >&2
+    echo "      default. Try: cp .env.example .env && set -a && . ./.env" >&2
+    exit 1
+  fi
+done
+unset _var
 
 EMISSION_LOG="$(pwd)/artifacts/eos_emission_log.jsonl"
 mkdir -p "$(dirname "$EMISSION_LOG")"

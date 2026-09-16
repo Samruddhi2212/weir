@@ -6,6 +6,17 @@ name: Metrics Job Verification (Part 3.1)
 on:
   workflow_dispatch: {}
 
+# docker-compose.yml requires WEIR_S3_ACCESS_KEY/WEIR_S3_SECRET_KEY with
+# no default (a guessable default is worse than a required variable), and
+# compose evaluates interpolation over the whole file - so `up`, `ps`,
+# `logs` and `down` all need them, even in jobs that never touch S3.
+# These are a throwaway local identity for an ephemeral container:
+# SeaweedFS creates the identity from these same values at runtime, so
+# any self-consistent pair works. Not a credential.
+env:
+  WEIR_S3_ACCESS_KEY: weir-local-ci
+  WEIR_S3_SECRET_KEY: weir-local-ci-no-secret-needed
+
 jobs:
   verify:
     name: Rebuild Flink image, verify JDBC jars, run the metrics job against real data

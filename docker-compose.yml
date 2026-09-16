@@ -154,8 +154,16 @@ services:
       CATALOG_WAREHOUSE: s3a://weir-warehouse/warehouse
       CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
       CATALOG_S3_ENDPOINT: http://seaweedfs:8333
-      CATALOG_S3_ACCESS__KEY__ID: ${WEIR_S3_ACCESS_KEY:-admin}
-      CATALOG_S3_SECRET__ACCESS__KEY: ${WEIR_S3_SECRET_KEY:-***REMOVED***}
+      # Required, not defaulted. A built-in default means a misconfigured
+      # run silently succeeds against a credential anyone reading the repo
+      # already knows; requiring the variable makes that a startup error
+      # instead. Any value works locally (see .env.example for why it is
+      # the *pairing* that matters, not the value) - it just has to be
+      # chosen. Note this makes every `docker compose` invocation require
+      # both, including `ps`, `logs` and `down`, because interpolation is
+      # evaluated over the whole file regardless of which service starts.
+      CATALOG_S3_ACCESS__KEY__ID: ${WEIR_S3_ACCESS_KEY:?set WEIR_S3_ACCESS_KEY - any value works locally, see .env.example}
+      CATALOG_S3_SECRET__ACCESS__KEY: ${WEIR_S3_SECRET_KEY:?set WEIR_S3_SECRET_KEY - any value works locally, see .env.example}
       CATALOG_S3_PATH__STYLE__ACCESS: "true"
       CATALOG_URI: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-weir_catalog}
       CATALOG_JDBC_USER: ${POSTGRES_USER:-weir}
