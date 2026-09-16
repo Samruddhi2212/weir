@@ -85,6 +85,12 @@ jobs:
         run: |  # pragma: allowlist secret
           docker compose exec -T postgres psql -U weir -d weir_catalog -c \
             "CREATE TABLE IF NOT EXISTS public.weir_jdbc_smoke_test (id INT PRIMARY KEY, note TEXT);"
+          # The container now initialises its superuser from
+          # POSTGRES_PASSWORD, so a hardcoded 'weir' here fails
+          # authentication - which is exactly how this verification
+          # caught the inconsistency. The heredoc stays quoted so the
+          # SQL's own $ characters survive; the one credential is
+          # substituted into the file afterwards.
           cat > /tmp/jdbc_smoke.sql << 'EOF'
           SET 'table.dml-sync' = 'true';
           CREATE TABLE jdbc_smoke_sink (
@@ -96,10 +102,11 @@ jobs:
             'url' = 'jdbc:postgresql://postgres:5432/weir_catalog',
             'table-name' = 'public.weir_jdbc_smoke_test',
             'username' = 'weir',
-            'password' = 'weir'  -- pragma: allowlist secret
+            'password' = '__PG_PASSWORD__'
           );
           INSERT INTO jdbc_smoke_sink VALUES (1, 'jdbc connector loaded');
           EOF
+          sed -i "s|__PG_PASSWORD__|${POSTGRES_PASSWORD}|" /tmp/jdbc_smoke.sql
           docker compose cp /tmp/jdbc_smoke.sql flink-jobmanager:/tmp/jdbc_smoke.sql
           timeout 90 docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /tmp/jdbc_smoke.sql
           SMOKE_EXIT=$?
