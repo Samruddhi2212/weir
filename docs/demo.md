@@ -1,4 +1,4 @@
-# 60-second demo
+# Demo
 
 Shows the volume detector flagging an injected drop, end to end, through
 the real pipeline path: `weir_metrics` → detector → `weir_incidents`.
@@ -11,7 +11,7 @@ incident, and nothing caught it until the recording failed.
 
 **What this is and isn't.** This is a demonstration of the *mechanism*,
 not evidence of detection quality. Step 2 seeds a warm baseline directly
-so the recording fits in a minute — a detector with an unwarmed baseline
+so the recording stays short — a detector with an unwarmed baseline
 correctly returns `insufficient_baseline` and flags nothing, and warming
 one honestly takes ~8 weeks of data per bucket (which is what
 `benchmarks/run_benchmark.py` does, and why it takes half an hour). The
@@ -30,7 +30,7 @@ docker compose exec -T postgres psql -U weir -d weir_catalog < reliability/store
 pip install -r reliability/volume/requirements.txt
 ```
 
-## The recording (6 commands, ~60s)
+## The recording (6 commands, about 25 seconds at the default pacing)
 
 **1 — There are no incidents yet.**
 
