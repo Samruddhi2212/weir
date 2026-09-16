@@ -44,6 +44,46 @@ def is_behind_frontier(window_end, last_processed_window_end):
     return window_end <= last_processed_window_end
 
 
+def release_snapshot(conn):
+    """End the read-only transaction a fetch opened, before the caller
+    starts its per-window write transactions.
+
+    psycopg opens a transaction on the first execute against a
+    non-autocommit connection, and conn.transaction() nests as a
+    SAVEPOINT when one is already open. Leaving a fetch's transaction
+    open therefore silently turned process_window's "one window, one
+    transaction" (DEFENSE.md #45) into a savepoint inside a single
+    transaction that never committed. Postgres caches 64
+    subtransactions per backend and spills to the pg_subtrans SLRU past
+    that, so the cost of each window grew with the number of windows
+    already done.
+
+    Measured, not theorised: run 34885328884 scored at ~172/s for the
+    first few thousand windows and ~14/s by 50000, and reset to ~172/s
+    at every detector boundary - which is exactly where the transaction
+    was reopened. Nothing about the scores themselves changed, only how
+    long they took and whether a mid-run crash could actually be
+    resumed.
+
+    rollback, not commit: the transaction being ended only ever read,
+    and fetch_eligible_windows documents its result as an efficiency
+    filter whose staleness is harmless.
+    """
+    conn.rollback()
+    # Self-verifying on purpose. The fix is one line and its absence is
+    # invisible - the previous version produced correct scores, just
+    # slowly and without the crash-resumability process_window claims -
+    # so a regression would not show up as a failing assertion anywhere
+    # else.
+    status = conn.info.transaction_status.name
+    if status != "IDLE":
+        raise RuntimeError(
+            f"connection reports transaction_status={status} after rollback, not IDLE; "
+            f"process_window would nest as a SAVEPOINT rather than open its own "
+            f"transaction, which is the regression this function exists to prevent"
+        )
+
+
 def process_window(conn, window_start, window_end, observed_value, config):
     """One window, one transaction (DEFENSE.md #45): FOR UPDATE lock
     on detector_progress, branch on is_behind_frontier, update

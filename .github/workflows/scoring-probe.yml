@@ -14,15 +14,22 @@ on:
   workflow_dispatch:
     inputs:
       windows:
-        description: "Consecutive one-minute windows to seed and score"
+        description: "Consecutive one-minute windows to seed and score (120960 = 12 weeks)"
         required: false
         default: "20000"
+      settings:
+        description: "Comma-separated synchronous_commit values to measure"
+        required: false
+        default: "on"
 
 jobs:
   probe:
     name: Time detector scoring against a seeded window_metrics
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # A full 12-week probe is ~120960 windows x 3 detectors at the
+    # measured rate, plus seeding 8M column_metrics rows. Sized to let
+    # that finish rather than to the 20000-window default.
+    timeout-minutes: 200
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -58,10 +65,24 @@ jobs:
             < reliability/store/schema.sql
           docker compose exec -T postgres psql -U weir -d weir_catalog \
             < reliability/store/incidents_schema.sql
+      - name: Verify the Postgres activity sampler actually samples
+        # It silently errored on every one of 2044 attempts during
+        # benchmark run 35008661410 and collected nothing, because a
+        # row-constructor IN is not a thing psycopg can parameterise.
+        # --samples exits non-zero if any sample failed, so the
+        # instrument is now checked against a live Postgres rather than
+        # trusted.
+        run: |
+          python -u scripts/sample_pg_activity.py \
+            --out sampler-selftest.log \
+            --interval 1 --heartbeat 1 --samples 3 \
+            --port "${POSTGRES_PORT:-5432}"
+          cat sampler-selftest.log
       - name: Probe
         run: |
           python -u scripts/probe_scoring_throughput.py \
             --windows "${{ github.event.inputs.windows }}" \
+            --settings "${{ github.event.inputs.settings }}" \
             --port "${POSTGRES_PORT:-5432}"
       - name: Show logs on failure
         if: failure()

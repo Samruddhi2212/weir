@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 PICKUP_COLUMN = "tpep_pickup_datetime"
@@ -84,6 +85,39 @@ def load_sorted_trips(parquet_path, preserve_input_order=False):
     return rows
 
 
+def iter_sorted_trips(parquet_path, preserve_input_order=False, batch_size=100_000):
+    """Yield rows as dicts in batches instead of materialising the file.
+
+    Same ordering and _row_index semantics as load_sorted_trips - this is
+    purely about memory. A 12-week contiguous slice is ~10.5M rows, and
+    to_pylist() on that builds ~10GB of dicts, which OOM-killed the CI
+    runner (exit 143) while Kafka, Postgres and Flink shared the same
+    box. The Arrow table stays columnar; only batch_size rows are Python
+    dicts at any moment.
+    """
+    table = pq.read_table(parquet_path)
+    if PICKUP_COLUMN not in table.column_names:
+        raise SystemExit(
+            f"FAIL: {parquet_path} has no '{PICKUP_COLUMN}' column - found: {table.column_names}."
+        )
+    if preserve_input_order:
+        if "_row_index" not in table.column_names:
+            raise SystemExit(
+                f"FAIL: {parquet_path} is missing a _row_index column, which "
+                f"--preserve-input-order requires - the caller owns key identity in that mode."
+            )
+    else:
+        table = table.sort_by(PICKUP_COLUMN)
+        if "_row_index" in table.column_names:
+            table = table.drop_columns(["_row_index"])
+        table = table.append_column(
+            "_row_index", pa.array(range(table.num_rows), type=pa.int64())
+        )
+    for batch in table.to_batches(max_chunksize=batch_size):
+        for row in batch.to_pylist():
+            yield row
+
+
 def filter_resume(rows, resume_after_timestamp, resume_skip_ties):
     """Skips every row with pickup < resume_after_timestamp entirely,
     then skips the first resume_skip_ties rows with pickup ==
@@ -91,17 +125,21 @@ def filter_resume(rows, resume_after_timestamp, resume_skip_ties):
     #39. A no-op if resume_after_timestamp is None."""
     if resume_after_timestamp is None:
         return rows
-    result = []
-    ties_skipped = 0
-    for row in rows:
-        ts = row[PICKUP_COLUMN]
-        if ts < resume_after_timestamp:
-            continue
-        if ts == resume_after_timestamp and ties_skipped < resume_skip_ties:
-            ties_skipped += 1
-            continue
-        result.append(row)
-    return result
+
+    def generate():
+        ties_skipped = 0
+        for row in rows:
+            ts = row[PICKUP_COLUMN]
+            if ts < resume_after_timestamp:
+                continue
+            if ts == resume_after_timestamp and ties_skipped < resume_skip_ties:
+                ties_skipped += 1
+                continue
+            yield row
+
+    # Lazy, so a resumed run over a multi-million-row stream doesn't
+    # rebuild it as a list. Callers that need a list can wrap it.
+    return generate()
 
 
 def build_send_order(n, window, seed):
@@ -124,11 +162,19 @@ def build_send_order(n, window, seed):
 
 def replay(rows, producer, topic, speed_factor, max_sleep, limit, emission_log_path=None,
            shuffle_window=0, shuffle_seed=42):
-    if limit:
-        rows = rows[:limit]
-    if not rows:
-        print("no rows to replay", file=sys.stderr)
-        return 0, 0
+    # The shuffle path needs random access within a window and is only
+    # ever used with small --limit runs (measure_lateness, replay-verify),
+    # so it keeps the original list behaviour byte-for-byte. Everything
+    # else streams: the benchmark replays ~10.5M rows and materialising
+    # them is a multi-GB OOM.
+    streaming = shuffle_window <= 0 and not isinstance(rows, list)
+    if not streaming:
+        rows = list(rows)
+        if limit:
+            rows = rows[:limit]
+        if not rows:
+            print("no rows to replay", file=sys.stderr)
+            return 0, 0
 
     if emission_log_path:
         open(emission_log_path, "w", encoding="utf-8").close()
@@ -174,23 +220,16 @@ def replay(rows, producer, topic, speed_factor, max_sleep, limit, emission_log_p
     # within one, so the total of all sleeps - and therefore overall
     # replay duration and the compression ratio (DEFENSE.md #39's ratio
     # test) - is unchanged by turning shuffling on. See DEFENSE.md #40.
-    deltas = [0.0] * len(rows)
-    for i in range(1, len(rows)):
-        deltas[i] = max((rows[i][PICKUP_COLUMN] - rows[i - 1][PICKUP_COLUMN]).total_seconds(), 0.0)
-
-    send_order = build_send_order(len(rows), shuffle_window, shuffle_seed)
-
-    for idx in send_order:
-        row = rows[idx]
-        sleep_seconds = min(deltas[idx] / speed_factor, max_sleep)
+    def send_one(row, sleep_seconds):
+        nonlocal attempted
         if sleep_seconds > 0:
             time.sleep(sleep_seconds)
-
         pickup = row[PICKUP_COLUMN]
         # _row_index is stable across the whole dataset (assigned in
-        # load_sorted_trips, before any --limit/--resume slicing) - see
-        # DEFENSE.md #39 for why the key must not be derived from a
-        # loop-local position within whatever subset this call received.
+        # load_sorted_trips/iter_sorted_trips, before any --limit/--resume
+        # slicing) - see DEFENSE.md #39 for why the key must not be
+        # derived from a loop-local position within whatever subset this
+        # call received.
         trip_key = f"tlc-yellow-{row['_row_index']:08d}"
         payload = {k: v for k, v in row.items() if k != "_row_index"}
         event_ts_iso = pickup.isoformat() if hasattr(pickup, "isoformat") else str(pickup)
@@ -198,8 +237,43 @@ def replay(rows, producer, topic, speed_factor, max_sleep, limit, emission_log_p
         future.add_callback(lambda md, k=trip_key, ts=event_ts_iso: on_success(k, ts, md))
         future.add_errback(lambda exc, k=trip_key: on_error(k, exc))
         attempted += 1
-        if attempted % 1000 == 0:
-            print(f"replay_producer.py: attempted {attempted}/{len(rows)}", file=sys.stderr)
+        if attempted % 100000 == 0:
+            print(f"replay_producer.py: attempted {attempted}", file=sys.stderr)
+
+    if streaming:
+        # One row in hand at a time. Pacing is identical to the list
+        # path - each row's sleep is its gap from its true chronological
+        # predecessor - it just doesn't need every gap precomputed.
+        previous_pickup = None
+        sent = 0
+        for row in rows:
+            if limit and sent >= limit:
+                break
+            pickup = row[PICKUP_COLUMN]
+            delta = 0.0 if previous_pickup is None else max(
+                (pickup - previous_pickup).total_seconds(), 0.0
+            )
+            send_one(row, min(delta / speed_factor, max_sleep))
+            previous_pickup = pickup
+            sent += 1
+        if sent == 0:
+            print("no rows to replay", file=sys.stderr)
+            return 0, 0
+    else:
+        # Deltas are computed against TRUE chronological order, before any
+        # shuffling of send order - each row's own pacing sleep is tied to
+        # its real chronological predecessor regardless of when it actually
+        # gets sent. Windows are non-overlapping and shuffling only permutes
+        # within one, so the total of all sleeps - and therefore overall
+        # replay duration and the compression ratio (DEFENSE.md #39's ratio
+        # test) - is unchanged by turning shuffling on. See DEFENSE.md #40.
+        deltas = [0.0] * len(rows)
+        for i in range(1, len(rows)):
+            deltas[i] = max(
+                (rows[i][PICKUP_COLUMN] - rows[i - 1][PICKUP_COLUMN]).total_seconds(), 0.0
+            )
+        for idx in build_send_order(len(rows), shuffle_window, shuffle_seed):
+            send_one(rows[idx], min(deltas[idx] / speed_factor, max_sleep))
 
     # flush() blocks until every buffered send's callback (success or
     # error) has actually fired - `confirmed` is final and accurate only
@@ -256,16 +330,16 @@ def main():
     args = parser.parse_args()
 
     print(f"replay_producer.py: loading {args.input}", file=sys.stderr)
-    rows = load_sorted_trips(args.input, preserve_input_order=args.preserve_input_order)
+    rows = iter_sorted_trips(args.input, preserve_input_order=args.preserve_input_order)
     ordering = "input order preserved" if args.preserve_input_order else f"sorted by {PICKUP_COLUMN}"
-    print(f"replay_producer.py: {len(rows)} trips loaded, {ordering}", file=sys.stderr)
+    print(f"replay_producer.py: streaming trips, {ordering}", file=sys.stderr)
 
     if args.resume_after_timestamp:
         resume_ts = datetime.datetime.fromisoformat(args.resume_after_timestamp)
         rows = filter_resume(rows, resume_ts, args.resume_skip_ties)
         print(
             f"replay_producer.py: resuming after {resume_ts.isoformat()} "
-            f"(skipping {args.resume_skip_ties} tie(s)) - {len(rows)} trips remain",
+            f"(skipping {args.resume_skip_ties} tie(s))",
             file=sys.stderr,
         )
 

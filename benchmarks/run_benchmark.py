@@ -37,11 +37,13 @@ the buffer clears against something real, then excluded from every
 count.
 """
 import argparse
+import contextlib
 import datetime
 import json
 import statistics
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pyarrow as pa
@@ -60,7 +62,7 @@ from incidents.benchmark.catalog import (
     UpstreamBackfillReplay,
 )
 from incidents.benchmark.scenario import PICKUP_COLUMN, compose
-from ingestion.replay.replay_producer import load_sorted_trips
+from ingestion.replay.load_pickup_timestamps import plausible_window
 from reliability.freshness.config import DEFAULT_CONFIG as FRESHNESS_CONFIG
 from reliability.freshness.run import run_once as run_freshness
 from reliability.nullrate.config import config_for_column
@@ -73,28 +75,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_DIR = REPO_ROOT / "benchmarks" / "results"
 NULLRATE_COLUMN = "passenger_count"
 
-# (weekday, hour) bands, weekday 0=Mon. Warming one bucket needs
-# min_observations (480) one-minute windows in that bucket, i.e. ~8
-# weekly occurrences of its hour - so a contiguous short slice can warm
-# nothing, while a band replayed across months warms that bucket cheaply.
-#
-# Several bands, not one: a detection or false-positive rate computed
-# over a single (weekday, hour) is a rate over one baseline, not a
-# denominator worth publishing. These four span genuinely different
-# traffic regimes, so the FP rate reflects varied baseline conditions -
-# dense rush hour, near-empty overnight, and weekend daytime behave
-# nothing alike in this dataset (DEFENSE.md #38/#40).
-DEFAULT_BANDS = (
-    (0, 8),    # Monday 08:00 - weekday morning rush
-    (4, 18),   # Friday 18:00 - weekday evening peak
-    (2, 3),    # Wednesday 03:00 - weekday overnight lull
-    (5, 13),   # Saturday 13:00 - weekend daytime
-)
-# A gap wider than this between consecutive real windows marks the start
-# of a new band occurrence rather than a real arrival gap - an artifact
-# of band filtering, reported separately rather than silently counted as
-# detector noise.
-BAND_BOUNDARY_GAP_SECONDS = 120
+# A bucket gains one weekly sample per calendar week, so the span in
+# weeks IS the per-bucket sample count. min_observations (480 windows =
+# 8 weekly occurrences x 60 one-minute windows, DEFENSE.md #44) is the
+# floor; 10 weeks clears it with room to inject afterwards. The full
+# 17.4-week dataset would give ~17 samples but costs ~5.4h/run against a
+# 6h CI ceiling, and the 20-30 samples robust statistics prefers is not
+# reachable from this dataset at any tractable runtime - stated as a
+# limitation rather than implied away.
+DEFAULT_SPAN_WEEKS = 12
+WINDOWS_PER_WEEKLY_SAMPLE = 60
 # Past the real data by more than max_lag_seconds so the lag buffer
 # clears every real window without assume_no_more_arrivals.
 TRAILING_WINDOW_OFFSET = datetime.timedelta(seconds=900)
@@ -126,68 +116,131 @@ def connect(args):
 # Ground truth: scenarios placed against the real slice, before any run
 # --------------------------------------------------------------------
 
-def load_band_filtered(paths, bands):
-    """Load only the events falling in the chosen (weekday, hour) bands.
+def load_contiguous(paths, span_weeks, starts_at=None):
+    """A contiguous event-time slice as an Arrow table - deliberately NOT
+    Python dicts.
 
-    Filtered per file with pyarrow before materialising to Python, not
-    after: the four months are millions of rows and a full to_pylist()
-    would be gigabytes of dicts, while the bands are a low-single-digit
-    percentage of them.
+    Replaces the earlier (weekday, hour) band sampling, which was a
+    mistake: band sampling leaves ~42-hour gaps between occurrences, and
+    the freshness detector's entire signal IS the gap between consecutive
+    windows, so its baseline learned those artificial gaps as normal and
+    the detector became unmeasurable by construction.
 
-    Schemas differ across months - cbd_congestion_fee only exists from
-    2025-01 (DEFENSE.md #49) - so concat promotes, filling the older
-    months' missing column with nulls rather than refusing to combine.
-    _row_index is assigned once, after the combined sort, so keys are
-    unique and stable across the whole replayed stream.
+    Returns Arrow because a contiguous 12-week slice is ~10.5M rows, and
+    to_pylist() on that builds ~10GB of dicts and gets the CI runner
+    OOM-killed (exit 143) while Kafka, Postgres and Flink share the same
+    16GB box. Only the injection region is ever materialised - see
+    build_injected_table.
+
+    Implausible timestamps are dropped BEFORE anchoring: this dataset's
+    earliest pickup is a 2009 clock error, so anchoring on a raw min()
+    put the span in 2009 and selected one event. Reuses
+    load_pickup_timestamps' already-verified plausible window.
     """
-    filtered = []
+    tables = []
     for path in paths:
         table = pq.read_table(path)
         if PICKUP_COLUMN not in table.column_names:
             fail(f"{path} has no {PICKUP_COLUMN} column")
-        column = table.column(PICKUP_COLUMN)
-        weekday = pc.day_of_week(column, count_from_zero=True, week_start=1)
-        hour = pc.hour(column)
-        mask = None
-        for band_weekday, band_hour in bands:
-            in_band = pc.and_(pc.equal(weekday, band_weekday), pc.equal(hour, band_hour))
-            mask = in_band if mask is None else pc.or_(mask, in_band)
-        kept = table.filter(mask)
-        print(f"  {Path(path).name}: {kept.num_rows} of {table.num_rows} rows in band")
-        filtered.append(kept)
+        tables.append(table)
+    combined = pa.concat_tables(tables, promote_options="default").sort_by(PICKUP_COLUMN)
 
-    combined = pa.concat_tables(filtered, promote_options="default").sort_by(PICKUP_COLUMN)
-    rows = combined.to_pylist()
-    for index, row in enumerate(rows):
-        row["_row_index"] = index
-    return rows
+    window_start, window_end = plausible_window([str(path) for path in paths])
+    column = combined.column(PICKUP_COLUMN)
+    plausible = pc.and_(
+        pc.greater_equal(column, pa.scalar(window_start)),
+        pc.less(column, pa.scalar(window_end)),
+    )
+    dropped = combined.num_rows - pc.sum(pc.cast(plausible, pa.int64())).as_py()
+    if dropped:
+        print(f"  dropped {dropped} implausible timestamps outside {window_start} .. {window_end}")
+    combined = combined.filter(plausible)
 
+    column = combined.column(PICKUP_COLUMN)
+    first_event = starts_at or pc.min(column).as_py()
+    last_event = first_event + datetime.timedelta(weeks=span_weeks)
+    sliced = combined.filter(pc.and_(
+        pc.greater_equal(column, pa.scalar(first_event)),
+        pc.less(column, pa.scalar(last_event)),
+    ))
+    print(f"  contiguous slice {first_event} .. {last_event} "
+          f"({span_weeks} weeks): {sliced.num_rows} rows")
+    if sliced.num_rows == 0:
+        fail(f"no events in the contiguous span {first_event} .. {last_event}")
 
-def parse_bands(raw):
-    if not raw:
-        return list(DEFAULT_BANDS)
-    bands = []
-    for item in raw:
-        try:
-            weekday, hour = (int(part) for part in item.split(":"))
-        except ValueError:
-            fail(f"--band expects weekday:hour (0=Mon), got {item!r}")
-        if not (0 <= weekday <= 6 and 0 <= hour <= 23):
-            fail(f"--band out of range: {item!r}")
-        bands.append((weekday, hour))
-    return bands
+    # Stable global keys, assigned once over the whole slice so they stay
+    # unique across the warmup passthrough and the injected region.
+    return sliced.append_column("_row_index", pa.array(range(sliced.num_rows), type=pa.int64()))
 
 
-def build_scenarios(events, warmup_fraction):
+def table_bounds(table):
+    column = table.column(PICKUP_COLUMN)
+    return pc.min(column).as_py(), pc.max(column).as_py()
+
+
+def rows_between(table, start, end):
+    """Materialise only a bounded slice as dicts."""
+    column = table.column(PICKUP_COLUMN)
+    mask = pc.and_(pc.greater_equal(column, pa.scalar(start)), pc.less(column, pa.scalar(end)))
+    return table.filter(mask).to_pylist()
+
+
+def build_injected_table(table, scenarios, injection_start):
+    """Apply the catalog without materialising the warmup region.
+
+    Every scenario only touches events inside its own declared span, and
+    all spans sit after injection_start - with one exception, the
+    backfill, whose source window is deliberately in warmup. That slice
+    is materialised on its own and handed to the scenario directly, so
+    the multi-million-row warmup never becomes Python dicts.
+    """
+    column = table.column(PICKUP_COLUMN)
+    warmup = table.filter(pc.less(column, pa.scalar(injection_start)))
+    injection_rows = table.filter(pc.greater_equal(column, pa.scalar(injection_start))).to_pylist()
+    print(f"  materialised {len(injection_rows)} injection-region rows "
+          f"({warmup.num_rows} warmup rows passed through as Arrow)")
+
+    for scenario in scenarios:
+        if isinstance(scenario, UpstreamBackfillReplay):
+            replay_from = scenario.starts_at - scenario.backfill_age
+            scenario.source_events = rows_between(
+                table, replay_from, replay_from + scenario.backfill_span
+            )
+            print(f"  backfill source: {len(scenario.source_events)} rows from {replay_from}")
+
+    injected_rows = compose(scenarios, injection_rows)
+    injected_table = pa.Table.from_pylist(injected_rows, schema=table.schema)
+    return pa.concat_tables([warmup, injected_table]), len(injected_rows), warmup.num_rows
+
+
+def build_scenarios(first, last, warmup_fraction):
     """Place every catalog scenario in the injection portion of the
     slice. Injections must land AFTER the warmup portion - a detector
     with an unwarmed baseline cannot score anything, so an injection
     during warmup would be scored as a detector miss when it is really
     an experiment-design error.
     """
-    first, last = events[0][PICKUP_COLUMN], events[-1][PICKUP_COLUMN]
     span = last - first
     injection_start = first + span * warmup_fraction
+
+    # A bucket only becomes scoreable once it has min_observations
+    # windows, gained at WINDOWS_PER_WEEKLY_SAMPLE per calendar week.
+    # If injections start before that, every one of them scores
+    # 'insufficient_baseline' and misses by construction - which would
+    # read as detector failure rather than an experiment that never
+    # tested anything. Checked rather than assumed.
+    warmup_weeks = (span * warmup_fraction).total_seconds() / (7 * 24 * 3600)
+    warmup_observations = warmup_weeks * WINDOWS_PER_WEEKLY_SAMPLE
+    if warmup_observations < VOLUME_CONFIG.min_observations:
+        fail(
+            f"warmup covers {warmup_weeks:.1f} weeks = ~{warmup_observations:.0f} observations "
+            f"per bucket, below min_observations ({VOLUME_CONFIG.min_observations}). Every "
+            f"injection would land on an unwarmed baseline and miss by construction. Raise "
+            f"--span-weeks or --warmup-fraction so warmup covers at least "
+            f"{VOLUME_CONFIG.min_observations / WINDOWS_PER_WEEKLY_SAMPLE:.0f} weeks."
+        )
+    print(f"  warmup: {warmup_weeks:.1f} weeks (~{warmup_observations:.0f} observations/bucket, "
+          f"floor {VOLUME_CONFIG.min_observations}); injections begin {injection_start}")
     injection_span = last - injection_start
     if injection_span.total_seconds() <= 0:
         fail(f"warmup_fraction {warmup_fraction} leaves no room to inject anything")
@@ -247,62 +300,69 @@ def assert_spans_disjoint(scenarios):
              + "; ".join(overlaps))
 
 
-def predict_emitted_count(scenarios, clean_events):
-    """Independently predict how many rows the injected stream should
-    carry, from each scenario's declared effect - NOT by measuring the
-    transformed list (that would assert a transform against itself).
+def count_between(table, start, end):
+    column = table.column(PICKUP_COLUMN)
+    mask = pc.and_(pc.greater_equal(column, pa.scalar(start)), pc.less(column, pa.scalar(end)))
+    return pc.sum(pc.cast(mask, pa.int64())).as_py() or 0
 
-    Only the two scenarios that change cardinality are counted here;
-    reordering and mutation preserve it. Drops are counted by asking
-    each scenario which events it would remove, which is the same
-    declared rule the injection uses, evaluated separately.
+
+def predict_emitted_count(scenarios, table, slice_end):
+    """Independently predict how many rows the injected stream should
+    carry, from each scenario's DECLARED effect - never by measuring the
+    transformed output, which would assert a transform against itself.
+
+    Counted over the Arrow table so the prediction costs no memory. The
+    dropping scenarios are evaluated against only their own span, which
+    is exactly the rule they declare, computed a second way.
     """
-    total = len(clean_events)
+    total = table.num_rows
     for scenario in scenarios:
+        span_end = scenario.ends_at or slice_end
         if isinstance(scenario, DuplicateEventStorm):
-            in_span = sum(1 for e in clean_events if scenario.covers(e[PICKUP_COLUMN]))
-            total += in_span * (scenario.copies - 1)
+            total += count_between(table, scenario.starts_at, span_end) * (scenario.copies - 1)
         elif isinstance(scenario, UpstreamBackfillReplay):
             replay_from = scenario.starts_at - scenario.backfill_age
-            replay_until = replay_from + scenario.backfill_span
-            total += sum(1 for e in clean_events if replay_from <= e[PICKUP_COLUMN] < replay_until)
+            total += count_between(table, replay_from, replay_from + scenario.backfill_span)
         elif isinstance(scenario, (PartitionDegradation, GradualDelay, SlowVolumeDecline)):
-            total -= len(clean_events) - len(scenario.inject(clean_events))
+            in_span = rows_between(table, scenario.starts_at, span_end)
+            total -= len(in_span) - len(scenario.inject(in_span))
     return total
+
+
+def peak_rss_mb():
+    """Peak resident memory for this process, so the headroom against the
+    runner's ceiling is reported rather than rediscovered by an OOM kill
+    on some later, larger run."""
+    try:
+        import resource
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    except (ImportError, AttributeError):
+        return None
 
 
 # --------------------------------------------------------------------
 # Replay + detection
 # --------------------------------------------------------------------
 
-def write_stream(events, path):
-    """Write the exact send order, _row_index included - replayed with
-    --preserve-input-order so neither is re-derived."""
-    pq.write_table(pa.Table.from_pylist(events), path)
-    return path
-
-
-def max_explainable_loss(scenarios, clean_events):
+def max_explainable_loss(scenarios, table, slice_end):
     """Upper bound on events the pipeline may legitimately fail to land.
 
     Only two scenarios can cause the pipeline to drop data: the backfill
-    replays months-old copies that are far past the watermark, and the
+    replays months-old copies far past the watermark, and the
     out-of-order flood makes part of its span arrive late. Bounding by
     "every event those two touch" deliberately over-counts rather than
     predicting Flink's exact watermark arithmetic - asserting a precise
     drop count would be asserting a model of Flink, not measuring it.
-    What this does catch is loss appearing anywhere it cannot be
-    explained, which is the V8 property that matters.
+    What this catches is loss appearing anywhere it cannot be explained,
+    which is the V8 property that matters.
     """
     bound = 0
     for scenario in scenarios:
         if isinstance(scenario, UpstreamBackfillReplay):
             replay_from = scenario.starts_at - scenario.backfill_age
-            replay_until = replay_from + scenario.backfill_span
-            bound += sum(1 for e in clean_events
-                         if replay_from <= e[PICKUP_COLUMN] < replay_until)
+            bound += count_between(table, replay_from, replay_from + scenario.backfill_span)
         elif isinstance(scenario, OutOfOrderFlood):
-            bound += sum(1 for e in clean_events if scenario.covers(e[PICKUP_COLUMN]))
+            bound += count_between(table, scenario.starts_at, scenario.ends_at or slice_end)
     return bound
 
 
@@ -328,6 +388,7 @@ def populate(args, stream_path, expected_count, label, allow_late_drop=False):
         "--limit", str(expected_count),
         "--expected-emitted-count", str(expected_count),
         "--preserve-input-order",
+        "--replay-timeout", str(args.replay_timeout),
     ]
     if allow_late_drop:
         cmd.append("--allow-late-drop")
@@ -367,12 +428,56 @@ def append_trailing_window(conn):
     return window_end
 
 
-def run_detectors(conn):
+PROGRESS_INTERVAL_SECONDS = 30.0
+
+
+@contextlib.contextmanager
+def timed(label, what):
+    """Wall-clock one step and print it. Printed on the way in as well
+    as out, so a step that never finishes is still identifiable."""
+    print(f"  [{label}] {what} ...", flush=True)
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        print(f"  [{label}] {what}: {time.monotonic() - started:.1f}s", flush=True)
+
+
+def progress_reporter(label, detector_name):
+    """A throttled progress(done, total) callback for run_once.
+
+    A contiguous span puts six figures of windows through one run_once
+    call, each in its own transaction. Run 34757520031 spent 4h36m in
+    that loop without printing anything and was killed at the CI
+    ceiling with no way to tell a slow run from a hung one. This prints
+    a rate and an ETA often enough to answer that, rarely enough not to
+    drown the log."""
+    state = {"last": time.monotonic(), "started": time.monotonic()}
+
+    def report(done, total):
+        now = time.monotonic()
+        if now - state["last"] < PROGRESS_INTERVAL_SECONDS and done != total:
+            return
+        state["last"] = now
+        elapsed = now - state["started"]
+        rate = done / elapsed if elapsed else 0.0
+        remaining = (total - done) / rate if rate else float("nan")
+        print(f"  [{label}] {detector_name}: {done}/{total} windows, "
+              f"{rate:.1f}/s, ~{remaining / 60:.1f} min left", flush=True)
+
+    return report
+
+
+def run_detectors(conn, label=""):
     """Every detector, lag buffer intact."""
     return {
-        "volume": run_volume(conn, VOLUME_CONFIG),
-        "freshness": run_freshness(conn, FRESHNESS_CONFIG),
-        f"null_rate_{NULLRATE_COLUMN}": run_nullrate(conn, NULLRATE_COLUMN),
+        "volume": run_volume(
+            conn, VOLUME_CONFIG, progress=progress_reporter(label, "volume")),
+        "freshness": run_freshness(
+            conn, FRESHNESS_CONFIG, progress=progress_reporter(label, "freshness")),
+        f"null_rate_{NULLRATE_COLUMN}": run_nullrate(
+            conn, NULLRATE_COLUMN,
+            progress=progress_reporter(label, f"null_rate_{NULLRATE_COLUMN}")),
     }
 
 
@@ -419,29 +524,33 @@ def warmed_bucket_count(conn):
         return cur.fetchone()[0]
 
 
-def band_boundary_window_ends(conn, trailing_window_end):
-    """window_end values that begin a new band occurrence.
+def bucket_sample_counts(conn):
+    """Actual observation_count per bucket at scoring time, per detector.
 
-    Band filtering leaves a gap of days between one band occurrence and
-    the next, and the freshness detector reads exactly those gaps. Those
-    are an artifact of how this benchmark samples the data, not a real
-    arrival failure - measured and reported separately so a reader can
-    tell experiment design apart from detector noise. Not excluded: the
-    incidents still count, they're just also broken out.
+    Reported rather than assumed: min_observations is a floor, not
+    evidence that the baselines are mature. observation_count counts
+    one-minute windows; the statistically meaningful unit is distinct
+    weekly occurrences (the 60 windows inside one hour are autocorrelated
+    - DEFENSE.md #44), so weekly samples are reported alongside.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT window_end FROM weir_metrics.window_metrics "
-            "WHERE window_end <> %s ORDER BY window_end ASC",
-            (trailing_window_end,),
+            "SELECT detector_name, COUNT(*), MIN(observation_count), "
+            "       MAX(observation_count), "
+            "       PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY observation_count) "
+            "FROM weir_incidents.baseline_state GROUP BY detector_name ORDER BY detector_name"
         )
-        ends = [r[0] for r in cur.fetchall()]
-
-    boundaries = set()
-    for previous, current in zip(ends, ends[1:]):
-        if (current - previous).total_seconds() > BAND_BOUNDARY_GAP_SECONDS:
-            boundaries.add(to_utc_instant(current, VOLUME_CONFIG.timezone))
-    return boundaries
+        stats = {}
+        for name, buckets, low, high, median in cur.fetchall():
+            stats[name] = {
+                "buckets": buckets,
+                "observation_count_min": int(low),
+                "observation_count_median": float(median),
+                "observation_count_max": int(high),
+                "weekly_samples_min": int(low) / WINDOWS_PER_WEEKLY_SAMPLE,
+                "weekly_samples_median": float(median) / WINDOWS_PER_WEEKLY_SAMPLE,
+            }
+        return stats
 
 
 def clean_event_time_hours(conn, trailing_window_end):
@@ -495,6 +604,57 @@ def assert_accounting(conn, trailing_window_end, label):
 # Scoring
 # --------------------------------------------------------------------
 
+def scoring_trace(conn, scenario, slice_end):
+    """Every scored_windows row inside a scenario's declared span, with the
+    exact numbers the detector used.
+
+    No new instrumentation: scored_windows already persists
+    observed_value, baseline_mean_at_time, baseline_scale_at_time and
+    score for every window, precisely so a threshold sweep can re-score
+    without re-running (DEFENSE.md #45). A miss therefore has a
+    checkable cause rather than a candidate explanation - either the
+    windows were never scored (a different bug), or they were scored and
+    the score never crossed the threshold, and these rows say by how much.
+    """
+    if scenario.expected_detector is None:
+        return None
+    span_end = scenario.ends_at or slice_end
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT window_end, status, observed_value, baseline_mean_at_time, "
+            "       baseline_scale_at_time, score "
+            "FROM weir_incidents.scored_windows "
+            "WHERE detector_name = %s AND window_end >= %s AND window_end < %s "
+            "ORDER BY window_end ASC",
+            (scenario.expected_detector,
+             to_utc_instant(scenario.starts_at, VOLUME_CONFIG.timezone),
+             to_utc_instant(span_end, VOLUME_CONFIG.timezone)),
+        )
+        rows = cur.fetchall()
+
+    statuses = {}
+    scored = []
+    for window_end, status, observed, mean, scale, score in rows:
+        statuses[status] = statuses.get(status, 0) + 1
+        if score is not None:
+            scored.append({
+                "window_end": window_end, "observed_value": float(observed),
+                "baseline_mean": float(mean), "baseline_scale": float(scale),
+                "score": float(score),
+            })
+
+    ranked = sorted(scored, key=lambda r: abs(r["score"]), reverse=True)
+    return {
+        "detector": scenario.expected_detector,
+        "windows_in_span": len(rows),
+        "status_counts": statuses,
+        "windows_scored": len(scored),
+        "threshold": VOLUME_CONFIG.z_threshold,
+        "max_abs_score": abs(ranked[0]["score"]) if ranked else None,
+        "closest_to_threshold": ranked[:20],
+    }
+
+
 def attribute(scenarios, incidents, slice_end):
     """Match incidents to scenarios on ground truth alone: the incident's
     detector must be the one the scenario declared, and its window_end
@@ -538,7 +698,7 @@ def percentile(values, fraction):
 
 
 def summarise(scenario_results, clean_incidents, clean_scored, clean_hours, unattributed,
-              warmed_buckets=None, bands=None, boundary_window_ends=frozenset()):
+              warmed_buckets=None, span_weeks=None, bucket_samples=None):
     detected = [r for r in scenario_results if r["detected"]]
     targeted = [r for r in scenario_results if r["expected_detector"] is not None]
     targeted_detected = [r for r in targeted if r["detected"]]
@@ -554,13 +714,15 @@ def summarise(scenario_results, clean_incidents, clean_scored, clean_hours, unat
              "denominator. That is an unwarmed baseline, not a 0% false-positive rate - "
              "replay a span long enough to warm at least one bucket.")
 
-    at_boundary = [i for i in clean_incidents if i["window_end"] in boundary_window_ends]
+    samples = bucket_samples or {}
+    weekly = [d["weekly_samples_median"] for d in samples.values()]
 
     return {
         "warmed_buckets": warmed_buckets,
-        "bands": [f"{weekday}:{hour}" for weekday, hour in (bands or [])],
-        "band_count": len(bands or []),
-        "false_positives_at_band_boundaries": len(at_boundary),
+        "peak_rss_mb": peak_rss_mb(),
+        "span_weeks": span_weeks,
+        "bucket_samples": samples,
+        "weekly_samples_median": min(weekly) if weekly else None,
         "scenarios_total": len(scenario_results),
         "scenarios_detected": len(detected),
         "detection_rate": len(detected) / len(scenario_results),
@@ -614,11 +776,14 @@ def render_markdown(scenario_results, summary):
         f"- detection latency: median {secs(summary['detection_latency_median_seconds'])}, "
         f"p95 {secs(summary['detection_latency_p95_seconds'])} (event time, nearest-rank)",
         f"- scenarios: {summary['scenarios_total']}",
-        f"- warmed buckets: {summary['warmed_buckets']} across {summary['band_count']} "
-        f"(weekday:hour) bands {', '.join(summary['bands'])}",
+        f"- warmed buckets: {summary['warmed_buckets']} over a contiguous "
+        f"{summary['span_weeks']}-week span",
+        f"- weekly samples per bucket (median, lowest detector): "
+        f"{summary['weekly_samples_median']}",
+        f"- peak resident memory: {summary['peak_rss_mb']} MB"
+        if summary.get("peak_rss_mb") else "- peak resident memory: unavailable on this platform",
         f"- clean event-time hours covered: {summary['clean_event_time_hours']:.2f}",
-        f"- of those false positives, at a band boundary (an artifact of band sampling, "
-        f"not a real arrival gap): {summary['false_positives_at_band_boundaries']}",
+
         f"- unattributed incidents in the injected replay: "
         f"{summary['unattributed_injected_incidents']}",
     ]
@@ -644,11 +809,16 @@ def write_results(payload):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, nargs="+",
-                        help="real TLC parquet file(s) to replay - several months, since warming "
-                             "one bucket needs ~8 weekly occurrences of its hour")
-    parser.add_argument("--band", action="append", default=None,
-                        help="weekday:hour band to replay (0=Mon), repeatable. Defaults to four "
-                             "bands spanning different traffic regimes.")
+                        help="real TLC parquet file(s) to replay - several months, since a bucket "
+                             "gains one weekly sample per calendar week")
+    parser.add_argument("--span-start", default=None,
+                        help="ISO event-time to anchor the contiguous span (default: the first "
+                             "plausible event). Explicit is better for reproducing a run.")
+    parser.add_argument("--span-weeks", type=float, default=DEFAULT_SPAN_WEEKS,
+                        help=f"contiguous event-time span to replay, in weeks (default "
+                             f"{DEFAULT_SPAN_WEEKS}). This IS the per-bucket weekly sample count; "
+                             f"it must exceed the 8-week min_observations floor with room to "
+                             f"inject after warmup.")
     parser.add_argument("--bootstrap-server", required=True)
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=5432)
@@ -657,68 +827,107 @@ def main():
     parser.add_argument("--password", default="weir")
     parser.add_argument("--limit", type=int, default=0,
                         help="replay only the first N real trips (0 = all)")
-    parser.add_argument("--warmup-fraction", type=float, default=0.6,
+    parser.add_argument("--warmup-fraction", type=float, default=0.75,
                         help="fraction of the slice reserved for baseline warmup before any "
                              "injection - an injection during warmup would be scored as a "
                              "detector miss when it is an experiment-design error")
     parser.add_argument("--populate-timeout", type=int, default=3600)
+    parser.add_argument("--replay-timeout", type=int, default=7200,
+                        help="seconds allowed for each replay; measured throughput is "
+                             "~2,800 events/s, so millions of events need hours")
     args = parser.parse_args()
 
-    bands = parse_bands(args.band)
-    print(f"=== Stage 1: load the real slice, bands {bands} ===")
-    clean_events = load_band_filtered(args.input, bands)
-    if args.limit:
-        clean_events = clean_events[:args.limit]
-    if not clean_events:
-        fail(f"no events matched bands {bands} in {args.input}")
-    slice_start = clean_events[0][PICKUP_COLUMN]
-    slice_end = clean_events[-1][PICKUP_COLUMN]
-    print(f"{len(clean_events)} real trips, event time {slice_start} .. {slice_end}")
+    print(f"=== Stage 1: load a contiguous {args.span_weeks}-week slice ===")
+    span_start = datetime.datetime.fromisoformat(args.span_start) if args.span_start else None
+    clean_table = load_contiguous(args.input, args.span_weeks, starts_at=span_start)
+    slice_start, slice_end = table_bounds(clean_table)
+    print(f"{clean_table.num_rows} real trips, event time {slice_start} .. {slice_end}")
 
     print("\n=== Stage 2: fix ground truth before either replay (V7) ===")
-    scenarios = build_scenarios(clean_events, args.warmup_fraction)
+    scenarios = build_scenarios(slice_start, slice_end, args.warmup_fraction)
     assert_spans_disjoint(scenarios)
     for scenario in scenarios:
         print(f"  {scenario.name}: {scenario.starts_at} .. {scenario.ends_at} "
               f"-> expects {scenario.expected_detector or 'MISS (no detector targets it)'}")
 
-    injected_events = compose(scenarios, clean_events)
-    predicted = predict_emitted_count(scenarios, clean_events)
-    if len(injected_events) != predicted:
-        fail(f"injected stream has {len(injected_events)} events but the scenarios' declared "
-             f"effects predict {predicted} - a scenario is not doing what it declares")
-    print(f"PASS: injected stream is {len(injected_events)} events, matching the independent "
-          f"prediction from declared effects")
+    injection_start = min(s.starts_at for s in scenarios)
+    injected_table, injected_rows, warmup_rows = build_injected_table(
+        clean_table, scenarios, injection_start
+    )
+    predicted = predict_emitted_count(scenarios, clean_table, slice_end)
+
+    # Seam assertion (V7/V8): rows now take two paths - Arrow passthrough
+    # for warmup, materialised dicts for the injection region - and a
+    # silent drop at that seam would look exactly like a detection
+    # result. Both the total and the split are checked, so a loss on
+    # either side of the seam is caught rather than averaging out.
+    if injected_table.num_rows != predicted:
+        fail(f"injected stream has {injected_table.num_rows} rows but the scenarios' declared "
+             f"effects predict {predicted} - a scenario is not doing what it declares, or rows "
+             f"were lost at the Arrow/dict seam")
+    if warmup_rows + injected_rows != injected_table.num_rows:
+        fail(f"seam accounting is inconsistent: {warmup_rows} warmup + {injected_rows} injected "
+             f"!= {injected_table.num_rows} written")
+    expected_warmup = count_between(clean_table, slice_start, injection_start)
+    if warmup_rows != expected_warmup:
+        fail(f"the warmup passthrough carried {warmup_rows} rows but the slice holds "
+             f"{expected_warmup} before {injection_start} - rows were lost passing through Arrow")
+    print(f"PASS: injected stream is {injected_table.num_rows} rows "
+          f"({warmup_rows} warmup passthrough + {injected_rows} injected), matching the "
+          f"independent prediction from declared effects")
 
     with connect(args) as conn:
         phases = {}
-        for label, events, expected in (
-            ("clean", clean_events, len(clean_events)),
-            ("injected", injected_events, predicted),
+        for label, table, expected in (
+            ("clean", clean_table, clean_table.num_rows),
+            ("injected", injected_table, predicted),
         ):
             stream_path = REPO_ROOT / f"benchmarks/results/_stream_{label}.parquet"
-            write_stream(events, stream_path)
+            pq.write_table(table, stream_path)
             # Only the injected stream deliberately contains events the
             # pipeline is supposed to drop; the clean run keeps the exact
             # zero-loss invariant, which is what makes it a usable FP
             # denominator in the first place.
             populate(args, stream_path, expected, label, allow_late_drop=(label == "injected"))
 
-            reset_detector_state(conn)
-            trailing = append_trailing_window(conn)
-            statuses = run_detectors(conn)
-            real_windows = assert_accounting(conn, trailing, label)
+            # Every post-populate step is timed. Run 34757520031 spent
+            # 4h36m somewhere in this block and died at the CI ceiling
+            # without narrowing it down; a measured probe later put
+            # scoring alone at well under that, so which step actually
+            # dominates is an open question this answers directly
+            # rather than by inference.
+            with timed(label, "reset detector state"):
+                reset_detector_state(conn)
+            with timed(label, "append trailing window"):
+                trailing = append_trailing_window(conn)
+            with timed(label, "score all detectors"):
+                statuses = run_detectors(conn, label)
+            with timed(label, "assert accounting"):
+                real_windows = assert_accounting(conn, trailing, label)
+
+            with timed(label, "collect incidents"):
+                incidents = collect_incidents(conn)
+            with timed(label, "bucket sample counts"):
+                bucket_samples = bucket_sample_counts(conn)
+            with timed(label, "landed row total"):
+                landed_rows = landed_row_total(conn, trailing)
+            with timed(label, "scored window counts"):
+                scored_windows = sum(
+                    c for _, status, c in scored_window_counts(conn) if status == "scored"
+                )
+            with timed(label, "warmed bucket count"):
+                warmed_buckets = warmed_bucket_count(conn)
+            with timed(label, "clean event-time hours"):
+                event_time_hours = clean_event_time_hours(conn, trailing)
 
             phases[label] = {
-                "incidents": collect_incidents(conn),
-                "band_boundaries": band_boundary_window_ends(conn, trailing),
-                "landed_rows": landed_row_total(conn, trailing),
-                "scored_windows": sum(
-                    c for _, status, c in scored_window_counts(conn) if status == "scored"
-                ),
+                "incidents": incidents,
+                "bucket_samples": bucket_samples,
+                "landed_rows": landed_rows,
+                "scored_windows": scored_windows,
                 "real_windows": real_windows,
-                "warmed_buckets": warmed_bucket_count(conn),
-                "event_time_hours": clean_event_time_hours(conn, trailing),
+                "warmed_buckets": warmed_buckets,
+                "event_time_hours": event_time_hours,
                 "statuses": {k: len(v) for k, v in statuses.items()},
             }
             stream_path.unlink(missing_ok=True)
@@ -745,19 +954,27 @@ def main():
         # attributable to a scenario that declares it - not merely
         # tolerated because injection was involved.
         injected_shortfall = predicted - injected["landed_rows"]
-        loss_bound = max_explainable_loss(scenarios, clean_events)
+        loss_bound = max_explainable_loss(scenarios, clean_table, slice_end)
         print(f"injected replay lost {injected_shortfall:.0f} of {predicted} events; "
               f"at most {loss_bound} are explainable by the scenarios that declare data loss")
         if injected_shortfall > loss_bound:
             fail(f"injected replay lost {injected_shortfall:.0f} events but only {loss_bound} "
                  f"are attributable to scenarios declaring loss - the rest is unexplained")
 
+        traces = {s.name: scoring_trace(conn, s, slice_end) for s in scenarios}
+        for name, trace in traces.items():
+            if trace is None:
+                continue
+            print(f"  {name}: {trace['windows_in_span']} windows in span, "
+                  f"{trace['windows_scored']} scored, statuses={trace['status_counts']}, "
+                  f"max|score|={trace['max_abs_score']} vs threshold {trace['threshold']}")
+
         scenario_results, unattributed = attribute(scenarios, injected["incidents"], slice_end)
         summary = summarise(
             scenario_results, clean["incidents"], clean["scored_windows"],
             clean["event_time_hours"], unattributed,
-            warmed_buckets=clean["warmed_buckets"], bands=bands,
-            boundary_window_ends=clean["band_boundaries"],
+            warmed_buckets=clean["warmed_buckets"],
+            span_weeks=args.span_weeks, bucket_samples=clean["bucket_samples"],
         )
 
     report = render_markdown(scenario_results, summary)
@@ -766,13 +983,16 @@ def main():
     path = write_results({
         "run_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "input": str(args.input),
-        "slice": {"start": slice_start, "end": slice_end, "events": len(clean_events)},
+        "slice": {"start": slice_start, "end": slice_end, "events": clean_table.num_rows},
+        "peak_rss_mb": peak_rss_mb(),
         "warmup_fraction": args.warmup_fraction,
+        "span_weeks": args.span_weeks,
         "composition_order": [s.name for s in scenarios],
         "summary": summary,
         "scenarios": scenario_results,
-        "clean_phase": {k: v for k, v in clean.items() if k not in ("incidents", "band_boundaries")},
-        "injected_phase": {k: v for k, v in injected.items() if k not in ("incidents", "band_boundaries")},
+        "scoring_traces": traces,
+        "clean_phase": {k: v for k, v in clean.items() if k != "incidents"},
+        "injected_phase": {k: v for k, v in injected.items() if k != "incidents"},
         "false_positive_incidents": clean["incidents"],
         "unattributed_injected_incidents": unattributed,
     })
