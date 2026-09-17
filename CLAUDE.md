@@ -86,6 +86,20 @@ already.
 11. Never squash, amend, force-push, or rewrite history. The history is
     evidence of how this was built and it stays intact, including the ugly
     parts.
+
+    **Overridden once, deliberately, on explicit instruction.** Before
+    the repository went public, `git filter-repo` rewrote all 167
+    commits across all ten branches to remove a local-dev credential
+    literal from seven files' historical blobs and from one commit
+    message, and to drop `Co-Authored-By` trailers. The rule was
+    restated twice with the cost spelled out (130 renumbered commits, a
+    force-push, merged PRs left pointing at orphaned commits) and
+    overridden anyway. Recorded here rather than quietly done, because
+    a rule this file states absolutely and that was then broken is
+    exactly the kind of docs-versus-reality gap the rest of this file
+    exists to prevent. Every commit was preserved - none squashed - and
+    the working tree came out byte-identical, verified by diffing
+    against a pre-rewrite bundle. See DEFENSE.md #56.
 12. Never commit generated benchmark results without me having actually run
     the benchmark that produced them.
 

@@ -3422,3 +3422,46 @@ promise about crash recovery went unverified for as long as it existed.
 The scores were right the whole time, which is exactly why this
 survived: a wrong performance characteristic and a wrong durability
 boundary can both hide behind correct output.
+
+## 56. Rewriting history to purge a credential literal - what it does and does not remove
+
+Hard rule 11 says history is never rewritten. It was, once, on explicit
+instruction, immediately before the repository went public: a local-dev
+credential literal (`${VAR:-<placeholder>}` defaults for SeaweedFS's S3
+secret) survived in the historical blobs of seven files and in one commit
+message, even though the working tree had already been remediated.
+
+`git filter-repo --replace-text` plus a `--message-callback` rewrote all
+167 commits across all ten branches. The same pass dropped
+`Co-Authored-By` trailers, since a second rewrite later would have cost
+the same disruption twice.
+
+**What was verified, not assumed:**
+
+- a full `git bundle --all` taken first, so the operation was reversible;
+- zero occurrences of the literal in any blob of any commit afterwards
+  (`git grep` across `git rev-list --all`), and zero in any message;
+- all 167 commits preserved - nothing squashed, nothing dropped;
+- the working tree diffed against the pre-rewrite bundle: **byte-identical**.
+  The rewrite changed history, not the shipped code, which is the only
+  way to know the redaction did not corrupt a live file.
+
+**What a force-push does NOT remove, which is the part worth knowing.**
+GitHub keeps commits reachable through pull-request refs
+(`refs/pull/N/head`) independently of any branch, and does not garbage-
+collect them on its own. After all ten branches were rewritten, the old
+commits were still served by the API by SHA - message and file contents
+intact. Branch history was clean; the objects were not gone.
+
+Removing those requires asking GitHub Support to run maintenance on the
+repository, or recreating the repository from scratch. Recreating was
+rejected: it would destroy the pull requests and the Actions run history,
+and this project's own documentation cites specific run IDs as evidence
+for published measurements - throwing that away to hide a localhost dev
+default would trade real evidence for cosmetic cleanliness.
+
+**The honest conclusion.** A force-push makes a secret unreachable by
+branch, not unrecoverable. For a real credential the only correct first
+step is rotation; scrubbing history is cleanup afterwards, never the fix.
+This one was a placeholder for an ephemeral container bound to localhost,
+which is the only reason cleanup alone was a defensible response.
